@@ -25,3 +25,24 @@ function pushActivation(window) {
 }
 
 workspace.windowActivated.connect(pushActivation);
+
+// Register a global hotkey that fires Fill on the daemon. By going
+// through registerShortcut, we get:
+//   - a System Settings entry (Shortcuts -> KWin -> "vw-autofill: fill")
+//     so the user can rebind it without editing config
+//   - no khotkeys/kglobalaccel external wiring; the shortcut lives
+//     with the script that already needs to be enabled anyway
+// Default keybind is Meta+Alt+V; user can change it freely.
+registerShortcut(
+    "vw-autofill-fill",
+    "vw-autofill: fill credentials into focused window",
+    "Meta+Alt+V",
+    function() {
+        callDBus(
+            "org.vwautofill.Daemon",
+            "/org/vwautofill/Daemon",
+            "org.vwautofill.Daemon1",
+            "Fill"
+        );
+    }
+);
