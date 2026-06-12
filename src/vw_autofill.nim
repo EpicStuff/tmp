@@ -35,12 +35,41 @@ proc cmdList() =
       (if r.title.len > 0: "  title=" & r.title else: ""),
       (if r.class.len > 0: "  class=" & r.class else: "")
 
+proc readBwSession(): string =
+  ## Get a vault session token. Priority:
+  ##   1. BW_SESSION env if non-empty
+  ##   2. spawn `bw unlock --raw` interactively
+  ## bw's password prompt goes to /dev/tty directly (Node inquirer),
+  ## so we just need to capture stdout for the session token.
+  let env = getEnv("BW_SESSION")
+  if env.len > 0:
+    return env
+  stderr.writeLine "Unlocking vault (bw unlock --raw)..."
+  let p = startProcess(
+    "bw unlock --raw 2>/dev/tty </dev/tty",
+    options = {poUsePath, poEvalCommand},
+  )
+  defer: p.close()
+  let token = p.outputStream.readAll().strip()
+  let code = p.waitForExit()
+  if code != 0 or token.len == 0:
+    raise newException(IOError, "bw unlock failed (exit " & $code & ")")
+  result = token
+
+proc warnIfNoYdotoold(socket: string) =
+  if not fileExists(socket):
+    stderr.writeLine "WARNING: ydotoold socket " & socket &
+      " not present. Fill will fail to type until you start ydotoold:"
+    stderr.writeLine "    sudo ydotoold --socket-path=" & socket &
+      " --socket-perm=0666"
+
 proc cmdDaemon() =
-  let session = getEnv("BW_SESSION")
+  let session = readBwSession()
   let b = newBwBackend(session)
   let rules = b.collectRules()
   let socket = getEnv("YDOTOOL_SOCKET", DefaultYdotoolSocket)
-  let logPath = getEnv("VW_AUTOFILL_LOG")
+  let logPath = getEnv("VW_AUTOFILL_LOG", "/tmp/vw-autofill-daemon.log")
+  warnIfNoYdotoold(socket)
   let d = newDaemon(rules, socket, logPath)
   let backend = b
   d.reloadProc = proc(): seq[BoundRule] = backend.collectRules()
