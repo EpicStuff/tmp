@@ -1,0 +1,79 @@
+  # using gdbus
+
+=== D-Bus session bus reachable ===
+$ gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListNames
+(['org.freedesktop.DBus', ':1.0', ':1.1', ':1.2', ':1.4', ':1.7', ':1.8', ':1.11', ':1.12', ':1.16', ':1.17', ':1.18', ':1.19', ':1.20', ':1.21', ':1.23', ':1.24', ':1.25', ':1.26', ':1.27', ':1.29', ':1.30', ':1.31', ':1.32', ':1.33', ':1.34', ':1.35', ':1.37', ':1.38', ':1.41', ':1.43', ':1.44', ':1.45', ':1.46', ':1.47', ':1.48', ':1.49', ':1.50', ':1.51', ':1.52', ':1.55', ':1.56', ':1.57', ':1.58', ':1.59', ':1.62', ':1.63', ':1.64', ':1.65', ':1.66', ':1.68', ':1.69', ':1.70', ':1.71', ':1.73', ':1.74', ':1.75', ':1.81', ':1.82', ':1.106', ':1.141', ':1.144', ':1.145', ':1.151', ':1.166', ':1.167', ':1.168', ':1.169', ':1.170', ':1.171', ':1.172', ':1.173', ':1.174', ':1.178', ':1.180', 'ca.desrt.dconf', 'com.canonical.Unity', 'dbus.JBR.server', 'org.a11y.Bus', 'org.eclipse.swt.BiglyBT', 'org.freedesktop.FileManager1', 'org.freedesktop.Notifications', 'org.freedesktop.PowerManagement', 'org.freedesktop.PowerManagement.Inhibit', 'org.freedesktop.ReserveDevice1.Audio0', 'org.freedesktop.ReserveDevice1.Audio1', 'org.freedesktop.ScreenSaver', 'org.freedesktop.a11y.Manager', 'org.freedesktop.background.Monitor', 'org.freedesktop.impl.portal.PermissionStore', 'org.freedesktop.impl.portal.desktop.gtk', 'org.freedesktop.impl.portal.desktop.kde', 'org.freedesktop.impl.portal.desktop.kwallet', 'org.freedesktop.portal.Desktop', 'org.freedesktop.portal.Documents', 'org.freedesktop.secrets', 'org.freedesktop.systemd1', 'org.gtk.Settings', 'org.io_safing_portmaster.SingleInstance', 'org.kde.ActivityManager', 'org.kde.GtkConfig', 'org.kde.JobViewServer', 'org.kde.KWin', 'org.kde.KWin.Effect.WindowView1', 'org.kde.KWin.HighlightWindow', 'org.kde.KWin.NightLight', 'org.kde.KWin.ScreenShot2', 'org.kde.KWinWrapper', 'org.kde.ScreenBrightness', 'org.kde.Solid.PowerManagement', 'org.kde.Solid.PowerManagement.PolicyAgent', 'org.kde.StatusNotifierHost-4218', 'org.kde.StatusNotifierItem-4497-1', 'org.kde.StatusNotifierWatcher', 'org.kde.dolphin-20049', 'org.kde.gmenudbusmenuproxy', 'org.kde.kaccess', 'org.kde.kappmenu', 'org.kde.kdeconnect', 'org.kde.kdeconnect.daemon', 'org.kde.kded6', 'org.kde.keyboard', 'org.kde.kglobalaccel', 'org.kde.klipper', 'org.kde.ksecretd', 'org.kde.ksmserver', 'org.kde.ksystemstats1', 'org.kde.kuiserver', 'org.kde.kwalletd', 'org.kde.kwalletd5', 'org.kde.kwalletd6', 'org.kde.org_kde_powerdevil', 'org.kde.plasma.browser.integration', 'org.kde.plasma.browser_integration', 'org.kde.plasmanetworkmanagement', 'org.kde.plasmashell', 'org.kde.plasmashell.accentColor', 'org.kde.polkit-kde-authentication-agent-1', 'org.kde.runners.activities', 'org.kde.runners.baloo', 'org.kde.screensaver', 'org.kde.secretservicecompat', 'org.kde.touchpad', 'org.kde.xembedsniproxy', 'org.pipewire.Telephony', 'org.pulseaudio.Server', 'org.rvaiya.keyd'],)
+
+=== xdg-desktop-portal RemoteDesktop present + capabilities ===
+  # introspect RemoteDesktop interface
+  # AvailableDeviceTypes property
+(<uint32 7>,)
+
+=== xdg-desktop-portal GlobalShortcuts present ===
+
+=== portal backend(s) installed ===
+  # /usr/share/xdg-desktop-portal/portals:
+gtk.portal
+kde.portal
+kwallet.portal
+4522 /usr/lib/xdg-desktop-portal
+4579 /usr/lib/xdg-desktop-portal-gtk
+4684 /usr/lib/xdg-desktop-portal-kde
+
+=== AT-SPI registry reachable ===
+('unix:path=/run/user/1000/at-spi/bus_1',)
+
+=== active keyboard layout ===
+$ localectl status
+System Locale: LANG=en_CA.UTF-8
+    VC Keymap: us
+   X11 Layout: us
+$ setxkbmap -query
+WARNING: Running setxkbmap against an Xwayland server
+rules:      evdev
+model:      pc105
+layout:     us
+(uint32 0,)
+
+=== KWin script API probe ===
+Drop the following file into:
+    ~/.local/share/kwin/scripts/vw-recon/contents/code/main.js
+
+And the metadata file alongside it:
+    ~/.local/share/kwin/scripts/vw-recon/metadata.json
+
+Then in System Settings -> Window Management -> KWin Scripts -> enable
+"vw-recon". Focus any 2-3 windows of your choice. Then run:
+    journalctl --user -t vw-recon -n 200 --no-pager
+and paste the output.
+
+When done, disable the script in System Settings.
+  # KWin script staged at ~/.local/share/kwin/scripts/vw-recon/
+
+=== portal RemoteDesktop one-shot handshake ===
+This runs a minimal CreateSession -> SelectDevices(KEYBOARD) -> Start
+sequence. Triggers the one-time portal consent dialog (click "Allow"
+when it appears). Does NOT type anything. Closes the session
+immediately afterward.
+
+Run separately:
+    python3 /tmp/vw-recon-portal.py
+  # portal probe staged at /tmp/vw-recon-portal.py
+  # needs python-pydbus and python-gobject. on Arch: pacman -S python-pydbus python-gobject
+
+=== summary ===
+
+Steps to complete this recon (paste outputs back):
+
+  1. Output above (already collected in /tmp/vw-recon.log).
+  2. Enable the KWin script in System Settings, focus 2-3 windows of
+     your choice (any apps), then:
+         journalctl --user -t vw-recon -n 200 --no-pager
+     ...and disable the script when done.
+  3. Run the portal probe:
+         pacman -S python-pydbus python-gobject   # if not installed
+         python3 /tmp/vw-recon-portal.py
+     Click "Allow" on the portal consent dialog when it appears.
+
+Paste the contents of /tmp/vw-recon.log plus the journalctl output and the portal
+probe output.
