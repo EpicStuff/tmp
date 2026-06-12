@@ -9,7 +9,7 @@
 ##
 ## More to come (capture, unlock helper).
 
-import std/[os, json, strutils, uri]
+import std/[os, json, strutils, uri, osproc, streams]
 import vw_autofill/[vault, rule, daemon, linux_consts]
 
 proc cmdStatus() =
@@ -42,7 +42,13 @@ proc cmdDaemon() =
   let socket = getEnv("YDOTOOL_SOCKET", DefaultYdotoolSocket)
   let logPath = getEnv("VW_AUTOFILL_LOG")
   let d = newDaemon(rules, socket, logPath)
+  let backend = b
+  d.reloadProc = proc(): seq[BoundRule] = backend.collectRules()
   d.serve()
+
+proc cmdReload() =
+  let n = sendReload()
+  echo "reloaded: ", n, " rule(s)"
 
 proc cmdFill() =
   sendFill()
@@ -75,6 +81,33 @@ proc promptDefault(prompt, default: string): string =
   let line = readLine(stdin).strip()
   if line.len == 0: default else: line
 
+proc fzfPick(prompt: string, choices: openArray[string]): string =
+  ## Show `choices` in fzf if available; fall back to a numeric
+  ## menu if not. Empty result means the user cancelled (esc / no
+  ## selection).
+  if findExe("fzf").len > 0:
+    let p = startProcess(
+      "fzf",
+      args = @["--prompt=" & prompt & "> ", "--height=30%", "--reverse",
+               "--no-multi"],
+      options = {poUsePath, poStdErrToStdOut},
+    )
+    p.inputStream.write(choices.join("\n"))
+    p.inputStream.close()
+    result = p.outputStream.readAll().strip()
+    discard p.waitForExit()
+    p.close()
+    return
+  echo prompt, ":"
+  for i, c in choices: echo "  ", i+1, ") ", c
+  stdout.write("pick [1]: "); stdout.flushFile()
+  let raw = readLine(stdin).strip()
+  let idx =
+    if raw.len == 0: 0
+    else:
+      try: parseInt(raw) - 1 except ValueError: -1
+  result = if idx >= 0 and idx < choices.len: choices[idx] else: ""
+
 proc cmdCapture() =
   ## Interactive rule-creation flow. Focus the target window, then
   ## answer a few prompts; we print a URI you can paste into a vault
@@ -99,19 +132,19 @@ proc cmdCapture() =
 
   let seqStr     = promptDefault("Sequence", "$user$tab$pass")
   let titleMatch = promptDefault("Title substring matcher (empty = none)", "")
-  let useClass   = promptDefault("Add class matcher? (y/N)", "n").toLowerAscii()
-  let modeStr    = promptDefault("Mode (hotkey/auto)", "hotkey").toLowerAscii()
+  let useClass   = fzfPick("Add class matcher?", ["no", "yes"]) == "yes"
+  let modeStr    = fzfPick("Mode", ["hotkey", "auto"])
 
   var qparts: seq[string]
   if titleMatch.len > 0:
     qparts.add "title=" & encodeUrl(titleMatch, usePlus = false)
-  if useClass == "y" or useClass == "yes":
+  if useClass:
     qparts.add "class=" & encodeUrl(win.cls, usePlus = false)
   qparts.add "seq=" & encodeUrl(seqStr, usePlus = false)
   if modeStr == "auto":
     qparts.add "mode=auto"
     # auto without any matcher needs unsafe=1 to pass isSafe
-    if titleMatch.len == 0 and (useClass != "y" and useClass != "yes"):
+    if titleMatch.len == 0 and not useClass:
       qparts.add "unsafe=1"
   let q = if qparts.len > 0: "?" & qparts.join("&") else: ""
   let uriStr = "linapp://" & win.exe & q
@@ -119,8 +152,8 @@ proc cmdCapture() =
   echo "Add this URI to a vault item's login URIs:"
   echo "  ", uriStr
   echo ""
-  echo "After saving in the vault, run `bw sync`, then restart the daemon"
-  echo "so it reloads rules."
+  echo "After saving in the vault, run `bw sync && vw_autofill reload`"
+  echo "to refresh the running daemon's rule set (no restart needed)."
 
 proc usage() =
   echo """vw-autofill — Bitwarden/Vaultwarden desktop autofill
@@ -133,6 +166,7 @@ Commands:
     status                print bw vault status JSON
     daemon                run the session-bus daemon (needs BW_SESSION)
     fill                  tell a running daemon to fire its cached match
+    reload                tell a running daemon to re-fetch rules from bw
     capture               interactive rule builder for the focused window
     introspect            fetch the daemon's introspection XML
     simulate EXE TITLE [CLASS] [PID]
@@ -154,6 +188,7 @@ when isMainModule:
   of "status":     cmdStatus()
   of "daemon":     cmdDaemon()
   of "fill":       cmdFill()
+  of "reload":     cmdReload()
   of "capture":    cmdCapture()
   of "introspect": cmdIntrospect()
   of "simulate":   cmdSimulate()

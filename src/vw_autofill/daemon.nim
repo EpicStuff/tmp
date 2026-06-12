@@ -36,6 +36,9 @@ const introspectionXml = """<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Obj
       <arg type="s" name="title" direction="out"/>
       <arg type="s" name="class" direction="out"/>
     </method>
+    <method name="Reload">
+      <arg type="u" name="rule_count" direction="out"/>
+    </method>
   </interface>
   <interface name="org.freedesktop.DBus.Introspectable">
     <method name="Introspect">
@@ -53,6 +56,10 @@ type
     lastMatch*: Option[BoundRule]
     socket*: string
     logf*: File
+    reloadProc*: proc(): seq[BoundRule] {.closure.}
+      ## Set by the CLI command that starts the daemon. Lets Reload()
+      ## re-fetch rules without us having to wire bw access into the
+      ## daemon module itself.
 
 proc log(d: Daemon, line: string) =
   ## Single sink for human-readable status. Stderr by default; if
@@ -145,6 +152,20 @@ proc handleLastWindow(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
   ])
   true
 
+proc handleReload(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
+  if d.reloadProc == nil:
+    bus.sendErrorReply(incoming,
+      "Reload not supported (daemon started without a reload proc)")
+    return true
+  try:
+    d.rules = d.reloadProc()
+    d.recomputeMatch()
+    d.log "reloaded: " & $d.rules.len & " rule(s)"
+    bus.sendReply(incoming, @[asDbusValue(d.rules.len.uint32)])
+  except CatchableError as e:
+    bus.sendErrorReply(incoming, "Reload failed: " & e.msg)
+  true
+
 proc dispatch(d: Daemon, kind: IncomingMessageType, incoming: IncomingMessage): bool =
   let iface = incoming.interfaceName
   let name  = incoming.name
@@ -162,6 +183,8 @@ proc dispatch(d: Daemon, kind: IncomingMessageType, incoming: IncomingMessage): 
       return true
     of "LastWindow":
       return d.handleLastWindow(d.bus, incoming)
+    of "Reload":
+      return d.handleReload(d.bus, incoming)
     else:
       d.bus.sendErrorReply(incoming, "unknown method " & name)
       return true
@@ -279,6 +302,18 @@ proc sendWindowActivated*(exe, title, cls: string, pid: uint32) =
   let reply = pending.waitForReply()
   defer: reply.close()
   reply.raiseIfError()
+
+proc sendReload*(): uint32 =
+  ## Client side: ask the running daemon to refetch rules from bw.
+  ## Returns new rule count.
+  let bus = getBus(DBUS_BUS_SESSION)
+  var msg = makeCall(BusName, ObjPath.ObjectPath, IfaceName, "Reload")
+  let pending = bus.sendMessageWithReply(msg)
+  let reply = pending.waitForReply()
+  defer: reply.close()
+  reply.raiseIfError()
+  var iter = reply.iterate()
+  result = iter.unpackCurrent(uint32)
 
 proc sendLastWindow*(): tuple[exe, title, cls: string] =
   ## Client side: ask the daemon what window it most recently saw
