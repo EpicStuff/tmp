@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# This script never invokes sudo. When elevation is needed it
-# prints the command for you to run in another terminal (or
-# the same one after answering the prompt), then waits.
+# Diagnose + fix the keyd / ydotool interaction.
 #
-# Iteration goal:
-#   1. capture xdg-desktop-portal-kde's own log line at the
-#      moment the screencast probe gets denied, in case
-#      fixing portal is cheap;
-#   2. install ydotool and prove keystroke injection works.
+# keyd grabs every keyboard-like /dev/input/event* it sees and
+# re-emits through its own uinput sink. When ydotoold creates a
+# new uinput device, keyd grabs that too, so ydotool's keystrokes
+# get filtered through keyd's remapping layer first and can come
+# out garbled.
+#
+# Fix: tell keyd to ignore ydotool's virtual device by its
+# vendor:product ID via the [ids] section.
 
 set -u
 OUT=/tmp/vw-run-next.log
@@ -19,105 +20,116 @@ pause() {
     read -r _
 }
 
-echo '=== part 1: portal denial log capture (no elevation needed) ===' | tee -a "$OUT"
+cat <<'INSTRUCTIONS'
+=== part 1: make sure ydotoold is running ===
 
-journalctl --user --since 'now' -f \
-    -u 'plasma-xdg-desktop-portal*' \
-    _COMM=xdg-desktop-portal_kde \
-    _COMM=xdg-desktop-portal \
-    > /tmp/vw-portal-journal.log 2>&1 &
-JOURNAL_PID=$!
-sleep 1
+In another terminal, start ydotoold (or check it's already up):
 
-if [ ! -f /tmp/vw-recon-screencast.py ]; then
-    echo '(staging /tmp/vw-recon-screencast.py via recon2.sh)'
-    bash scripts/recon2.sh > /dev/null 2>&1
-fi
-if [ -f /tmp/vw-recon-screencast.py ]; then
-    echo '$ python3 /tmp/vw-recon-screencast.py' | tee -a "$OUT"
-    python3 /tmp/vw-recon-screencast.py 2>&1 | tee -a "$OUT" || true
-else
-    echo 'could not stage screencast probe; skipping' | tee -a "$OUT"
-fi
+    sudo pkill -x ydotoold 2>/dev/null
+    sudo ydotoold --socket-path=/tmp/.ydotool_socket --socket-perm=0666
 
-sleep 2
-kill $JOURNAL_PID 2>/dev/null || true
-wait $JOURNAL_PID 2>/dev/null || true
+Leave it running.
+INSTRUCTIONS
+pause 'after ydotoold is up'
 
-echo | tee -a "$OUT"
-echo '--- portal-kde journal during the probe ---' | tee -a "$OUT"
-cat /tmp/vw-portal-journal.log | tee -a "$OUT"
+echo
+echo '=== part 2: identify ydotool virtual device ===' | tee -a "$OUT"
 echo | tee -a "$OUT"
 
-echo '=== part 2: install ydotool ==='
+# /proc/bus/input/devices shows each input device with N: (name),
+# I: (bus/vendor/product/version), H: (handlers). ydotool's
+# virtual keyboard typically appears with name containing 'ydotool'.
+echo '$ grep -B1 -A4 -i ydotool /proc/bus/input/devices' | tee -a "$OUT"
+DEVICE_BLOCK=$(grep -B1 -A4 -i ydotool /proc/bus/input/devices || true)
+echo "$DEVICE_BLOCK" | tee -a "$OUT"
 
-if command -v ydotool >/dev/null 2>&1 && command -v ydotoold >/dev/null 2>&1; then
-    echo 'ydotool already installed.' | tee -a "$OUT"
-else
-    cat <<'INSTRUCTIONS'
+if [ -z "$DEVICE_BLOCK" ]; then
+    echo '(no ydotool device found - is ydotoold running?)' | tee -a "$OUT"
+    echo 'aborting' | tee -a "$OUT"
+    exit 1
+fi
 
-Open another terminal (or use this one) and run:
+# Parse the I: line for vendor/product. Format:
+# I: Bus=0006 Vendor=1234 Product=5678 Version=0001
+INFO=$(printf '%s\n' "$DEVICE_BLOCK" | grep -m1 '^I:')
+VENDOR=$(printf '%s\n' "$INFO" | sed -n 's/.*Vendor=\([0-9a-fA-F]\+\).*/\1/p')
+PRODUCT=$(printf '%s\n' "$INFO" | sed -n 's/.*Product=\([0-9a-fA-F]\+\).*/\1/p')
 
-    sudo pacman -S --noconfirm ydotool
+if [ -z "$VENDOR" ] || [ -z "$PRODUCT" ]; then
+    echo '(could not parse vendor/product from device block)' | tee -a "$OUT"
+    exit 1
+fi
+
+# keyd's [ids] uses lowercase hex without 0x prefix.
+VENDOR=$(printf '%s' "$VENDOR" | tr 'A-F' 'a-f')
+PRODUCT=$(printf '%s' "$PRODUCT" | tr 'A-F' 'a-f')
+PAIR="$VENDOR:$PRODUCT"
+echo | tee -a "$OUT"
+echo "ydotool device id (vendor:product) = $PAIR" | tee -a "$OUT"
+
+echo
+echo '=== part 3: current keyd config ===' | tee -a "$OUT"
+ls /etc/keyd/ 2>&1 | tee -a "$OUT"
+for f in /etc/keyd/*.conf; do
+    [ -f "$f" ] || continue
+    echo | tee -a "$OUT"
+    echo "--- $f ---" | tee -a "$OUT"
+    cat "$f" | tee -a "$OUT"
+done
+
+cat <<INSTRUCTIONS | tee -a "$OUT"
+
+=== part 4: add exclusion to keyd config ===
+
+Edit /etc/keyd/default.conf (or whichever .conf you actually use)
+and ensure it has an [ids] section that excludes ydotool:
+
+    [ids]
+    *
+    -$PAIR
+
+If your config already has [ids] *, add the '-$PAIR' line.
+If it has explicit IDs instead of '*', do nothing here — keyd
+already isn't grabbing ydotool because it isn't in the include list.
+If you don't have an [ids] section at all, prepend the three-line
+block above to the file.
+
+You can do this in any editor; example:
+
+    sudoedit /etc/keyd/default.conf
+
+After editing, reload keyd:
+
+    sudo systemctl restart keyd
 
 INSTRUCTIONS
-    pause 'after the install finishes'
-fi
-echo '$ which ydotool ydotoold' | tee -a "$OUT"
-which ydotool ydotoold 2>&1 | tee -a "$OUT"
+
+pause 'after editing the config and restarting keyd'
 
 echo
-echo '=== part 3: start ydotoold (needs root) ==='
-SOCK=/tmp/.ydotool_socket
-cat <<INSTRUCTIONS
-
-Run this in another terminal and leave it running:
-
-    sudo ydotoold --socket-path=$SOCK --socket-perm=0666
-
-(it stays attached to the terminal printing nothing; you can
-suspend it with Ctrl-Z then 'bg' if you prefer, or run with &.)
-
-We use a custom socket with 0666 perms so the ydotool *client*
-(next step) doesn't itself need sudo.
-
-INSTRUCTIONS
-pause 'after ydotoold is running'
-
-if ! pgrep -x ydotoold >/dev/null; then
-    echo 'WARNING: ydotoold does not appear to be running. Continuing anyway' | tee -a "$OUT"
-    echo 'but the smoke test will probably fail.' | tee -a "$OUT"
-fi
-echo '$ pgrep -af ydotoold' | tee -a "$OUT"
-pgrep -af ydotoold | tee -a "$OUT" || echo '(none)' | tee -a "$OUT"
+echo '=== part 5: verify exclusion ===' | tee -a "$OUT"
+echo
+echo 'systemd journal for keyd showing what it grabbed since restart:'
+echo '$ journalctl -u keyd --since "1 minute ago" --no-pager' | tee -a "$OUT"
+journalctl -u keyd --since '1 minute ago' --no-pager 2>&1 | tee -a "$OUT" || \
+    echo '(journalctl access denied? run: sudo journalctl -u keyd --since "1 minute ago")' | tee -a "$OUT"
 
 echo
-echo '=== part 4: smoke test (no elevation; script runs this) ==='
+echo '=== part 6: re-test ydotool ===' | tee -a "$OUT"
 echo
-echo '>>> Now focus a window where text is safe to receive — a scratch'
-echo '>>> text editor, an empty terminal, the URL bar of about:blank, etc.'
-echo '>>> Press Enter here when focused; typing fires 3 seconds later.'
+echo '>>> Focus a safe target window (scratch editor / about:blank URL bar /'
+echo '>>> empty terminal). Press Enter; typing fires in 3 seconds.'
 read -r _
-( sleep 3; YDOTOOL_SOCKET=$SOCK ydotool type 'hello from ydotool' ) &
-TYPE_PID=$!
-wait $TYPE_PID
+( sleep 3; YDOTOOL_SOCKET=/tmp/.ydotool_socket ydotool type 'hello from ydotool round two' ) &
+wait $!
 echo
-printf 'Did "hello from ydotool" appear in your target window? (y/n) '
+printf 'Did "hello from ydotool round two" appear cleanly? (y/n/partial) '
 read -r ANSWER
 echo "user answer: $ANSWER" | tee -a "$OUT"
 
 echo
-echo '=== cleanup ==='
-cat <<INSTRUCTIONS
-
-Back in the terminal where ydotoold is running, Ctrl-C to stop it
-(or run 'sudo pkill -x ydotoold' in any terminal).
-
-INSTRUCTIONS
-
-echo
-echo "log file: $OUT"
+echo "log: $OUT"
 echo
 echo 'Paste back:'
 echo '  - /tmp/vw-run-next.log'
-echo '  - whether the ydotool smoke test typed into your target window'
+echo '  - whether ydotool now types cleanly'
