@@ -64,14 +64,42 @@ proc recomputeMatch(d: Daemon) =
       d.lastMatch = some(br)
       return
 
+proc anyString(v: DbusValue): string =
+  ## Accept dtString / dtObjectPath / dtSignature / dtVariant(string).
+  if v == nil: return ""
+  case v.kind
+  of dtString: v.stringValue
+  of dtObjectPath: v.objectPathValue.string
+  of dtSignature: v.signatureValue.string
+  of dtVariant: anyString(v.variantValue)
+  else: ""
+
+proc anyUint(v: DbusValue): uint32 =
+  ## Accept any integer or byte variant. KWin's JS marshals JS numbers
+  ## as int32 even when we declared the iface as uint32 (u); we have
+  ## to be tolerant on the wire even if the XML says one thing.
+  if v == nil: return 0
+  case v.kind
+  of dtByte:   v.byteValue.uint32
+  of dtInt16:  v.int16Value.uint32
+  of dtUint16: v.uint16Value.uint32
+  of dtInt32:  v.int32Value.uint32
+  of dtUint32: v.uint32Value
+  of dtInt64:  v.int64Value.uint32
+  of dtUint64: v.uint64Value.uint32
+  of dtVariant: anyUint(v.variantValue)
+  else: 0
+
 proc handleWindowActivated(d: Daemon, args: seq[DbusValue]): bool =
   if args.len < 4:
     d.log "WindowActivated: bad arg count " & $args.len
     return false
-  let exe   = args[0].asNative(string)
-  let title = args[1].asNative(string)
-  let cls   = args[2].asNative(string)
-  let pid   = args[3].asNative(uint32)
+  d.log "  arg kinds=" & $args[0].kind & "," & $args[1].kind &
+        "," & $args[2].kind & "," & $args[3].kind
+  let exe   = anyString(args[0])
+  let title = anyString(args[1])
+  let cls   = anyString(args[2])
+  let pid   = anyUint(args[3])
   d.lastWindow = WindowInfo(
     exePath: exe,
     exeName: extractFilename(exe),
@@ -83,7 +111,8 @@ proc handleWindowActivated(d: Daemon, args: seq[DbusValue]): bool =
   let label =
     if d.lastMatch.isSome: "match=" & d.lastMatch.get.credential.itemName
     else: "no match"
-  d.log "activated pid=" & $pid & " class=" & cls & " title=" & title & " -> " & label
+  d.log "activated pid=" & $pid & " exe=" & exe & " class=" & cls &
+        " title=" & title & " -> " & label
   true
 
 proc handleFill(d: Daemon): bool =
@@ -103,42 +132,58 @@ proc handleIntrospect(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
   bus.sendReply(incoming, @[asDbusValue(introspectionXml)])
   true
 
+proc dispatch(d: Daemon, kind: IncomingMessageType, incoming: IncomingMessage): bool =
+  let iface = incoming.interfaceName
+  let name  = incoming.name
+  d.log "recv kind=" & $kind & " iface='" & iface & "' name='" & name & "'"
+  if iface == IfaceName:
+    case name
+    of "WindowActivated":
+      let args = incoming.unpackValueSeq()
+      discard d.handleWindowActivated(args)
+      d.bus.sendReply(incoming, @[])
+      return true
+    of "Fill":
+      discard d.handleFill()
+      d.bus.sendReply(incoming, @[])
+      return true
+    else:
+      d.bus.sendErrorReply(incoming, "unknown method " & name)
+      return true
+  # Introspect can arrive with iface = "" (some clients omit it).
+  elif name == "Introspect" and (iface == IntroIface or iface.len == 0):
+    return d.handleIntrospect(d.bus, incoming)
+  # Standard Peer interface so busctl status / ping works.
+  elif iface == "org.freedesktop.DBus.Peer":
+    case name
+    of "Ping":
+      d.bus.sendReply(incoming, @[])
+      return true
+    of "GetMachineId":
+      d.bus.sendReply(incoming, @[asDbusValue("00000000000000000000000000000000")])
+      return true
+    else: discard
+  d.log "  -> no handler matched, replying error"
+  d.bus.sendErrorReply(incoming,
+    "no handler for " & iface & "." & name)
+  return true
+
 proc makeCallback(d: Daemon): MessageCallback =
+  # We must NEVER let an exception (or worse, a defect) cross the cdecl
+  # boundary back into libdbus -- it leaves the dispatcher in an
+  # inconsistent state and the daemon stops processing messages
+  # without dying, so clients hit NoReply forever. Catch everything
+  # here, log it, and try to send some kind of reply.
   result = proc(kind: IncomingMessageType, incoming: IncomingMessage): bool =
-    let iface = incoming.interfaceName
-    let name  = incoming.name
-    d.log "recv kind=" & $kind & " iface='" & iface & "' name='" & name & "'"
-    if iface == IfaceName:
-      case name
-      of "WindowActivated":
-        let args = incoming.unpackValueSeq()
-        let ok = d.handleWindowActivated(args)
-        d.bus.sendReply(incoming, @[])
-        return ok
-      of "Fill":
-        discard d.handleFill()
-        d.bus.sendReply(incoming, @[])
-        return true
-      else:
-        d.bus.sendErrorReply(incoming, "unknown method " & name)
-        return true
-    # Introspect can arrive with iface = "" (some clients omit it).
-    elif name == "Introspect" and (iface == IntroIface or iface.len == 0):
-      return d.handleIntrospect(d.bus, incoming)
-    # Standard Peer interface so busctl status / ping works.
-    elif iface == "org.freedesktop.DBus.Peer":
-      case name
-      of "Ping":
-        d.bus.sendReply(incoming, @[])
-        return true
-      of "GetMachineId":
-        d.bus.sendReply(incoming, @[asDbusValue("00000000000000000000000000000000")])
-        return true
-      else: discard
-    d.log "  -> no handler matched, replying error"
-    d.bus.sendErrorReply(incoming,
-      "no handler for " & iface & "." & name)
-    return true
+    try:
+      return d.dispatch(kind, incoming)
+    except Exception as e:
+      d.log "callback EXCEPTION: " & $e.name & ": " & e.msg
+      try:
+        d.bus.sendErrorReply(incoming, "vw-autofill: " & e.msg)
+      except CatchableError:
+        discard
+      return true
 
 proc newDaemon*(rules: seq[BoundRule], socket = DefaultYdotoolSocket,
                 logPath = ""): Daemon =
