@@ -36,7 +36,10 @@ proc cmdList() =
 proc bwUnlockInteractive(): string =
   ## Spawn `bw unlock --raw` with the prompt routed to /dev/tty so the
   ## user types their master password directly. Capture stdout for the
-  ## session token.
+  ## session token. NOTE: bw still phones home for ServerConfig on
+  ## unlock, so this requires the Vaultwarden server to be reachable.
+  ## After one successful unlock, the token is persisted (see
+  ## persistedSessionPath) so subsequent daemon restarts work offline.
   stderr.writeLine "Unlocking vault (bw unlock --raw)..."
   let p = startProcess(
     "bw unlock --raw 2>/dev/tty </dev/tty",
@@ -49,27 +52,52 @@ proc bwUnlockInteractive(): string =
     raise newException(IOError, "bw unlock failed (exit " & $code & ")")
   result = token
 
-proc verifySession(token: string): bool =
-  if token.len == 0: return false
+proc persistedSessionPath(): string =
+  let dir = getConfigDir() / "vw-autofill"
+  if not dirExists(dir):
+    createDir(dir)
+  dir / "session"
+
+proc readPersistedSession(): string =
+  let p = persistedSessionPath()
+  if not fileExists(p): return ""
   try:
-    let b = newBwBackend(token)
-    let s = b.status()
-    return s{"status"}.getStr == "unlocked"
-  except CatchableError:
-    return false
+    result = readFile(p).strip()
+  except IOError:
+    result = ""
+
+proc writePersistedSession(token: string) =
+  let p = persistedSessionPath()
+  try:
+    writeFile(p, token)
+    when defined(posix):
+      # Mode 0600 so other users on the box can't read the token.
+      setFilePermissions(p, {fpUserRead, fpUserWrite})
+  except CatchableError as e:
+    stderr.writeLine "WARNING: failed to persist session to " & p &
+      ": " & e.msg
 
 proc readBwSession(): string =
-  ## Get a vault session token:
-  ##   1. BW_SESSION env, *verified* against `bw status` (so a stale
-  ##      env from a previous session doesn't silently make every bw
-  ##      call fail with "Vault is locked")
-  ##   2. otherwise spawn `bw unlock --raw` interactively
+  ## Priority:
+  ##   1. BW_SESSION env (trusted as-is; no `bw status` verify, because
+  ##      verify itself calls the Vaultwarden server -- breaks offline)
+  ##   2. Persisted token at ~/.config/vw-autofill/session (mode 0600)
+  ##   3. Spawn `bw unlock --raw`, then persist the token
+  ##
+  ## If a stale/bad token makes it past 1-2, later bw operations will
+  ## fail with "Vault is locked" -- the daemon catches that on the
+  ## D-Bus method handlers; the user can `pkill` and rerun to re-unlock.
   let env = getEnv("BW_SESSION")
-  if env.len > 0 and verifySession(env):
-    return env
   if env.len > 0:
-    stderr.writeLine "BW_SESSION env is set but session is not unlocked."
-  bwUnlockInteractive()
+    return env
+  let cached = readPersistedSession()
+  if cached.len > 0:
+    stderr.writeLine "Using cached session from " & persistedSessionPath()
+    return cached
+  let token = bwUnlockInteractive()
+  writePersistedSession(token)
+  stderr.writeLine "Session cached at " & persistedSessionPath()
+  result = token
 
 proc findKwinScriptSource(): string =
   ## Look for data/kwin-script relative to the binary (the usual repo

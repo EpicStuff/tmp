@@ -33,16 +33,28 @@ workspace.windowActivated.connect(pushActivation);
 //   - no khotkeys/kglobalaccel external wiring; the shortcut lives
 //     with the script that already needs to be enabled anyway
 // Default keybind is Meta+Alt+V; user can change it freely.
-registerShortcut(
-    "vw-autofill-fill",
-    "vw-autofill: fill credentials into focused window",
-    "Meta+Alt+V",
-    function() {
-        callDBus(
-            "org.vwautofill.Daemon",
-            "/org/vwautofill/Daemon",
-            "org.vwautofill.Daemon1",
-            "Fill"
-        );
-    }
-);
+//
+// print() lines below land in the user's journal under the
+// kwin_wayland identifier; grep for "vw-autofill" to verify the
+// registration outcome:
+//   journalctl --user --since "5 minutes ago" | grep vw-autofill
+print("vw-autofill: script loaded; attempting registerShortcut");
+try {
+    var ok = registerShortcut(
+        "vw-autofill-fill",
+        "vw-autofill: fill credentials into focused window",
+        "Meta+Alt+V",
+        function() {
+            print("vw-autofill: Fill shortcut fired");
+            callDBus(
+                "org.vwautofill.Daemon",
+                "/org/vwautofill/Daemon",
+                "org.vwautofill.Daemon1",
+                "Fill"
+            );
+        }
+    );
+    print("vw-autofill: registerShortcut returned " + ok);
+} catch (e) {
+    print("vw-autofill: registerShortcut THREW " + e);
+}
