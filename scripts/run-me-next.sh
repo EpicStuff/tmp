@@ -26,7 +26,7 @@ pause() {
 say() { echo "$*" | tee -a "$LOG"; }
 
 say "=== part 1: build vw_autofill ==="
-( cd "$ROOT" && nimble build 2>&1 ) | tee -a "$LOG"
+( cd "$ROOT" && nimble --legacy build 2>&1 ) | tee -a "$LOG"
 if [ ! -x "$ROOT/bin/vw_autofill" ]; then
     say "build FAILED — see log above"
     exit 1
