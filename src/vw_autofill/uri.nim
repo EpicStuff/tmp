@@ -71,7 +71,7 @@ proc parseRuleUri*(s: string): Option[Rule] =
         of "auto": rule.mode = mAuto
         of "hotkey": rule.mode = mHotkey
         else: discard
-      of "sequence": rule.sequence = val
+      of "sequence", "seq": rule.sequence = val
       of "cooldown":
         try:
           rule.cooldown = parseInt(val)
