@@ -1,10 +1,1 @@
-sudo ydotoold --socket-path=/tmp/.ydotool_socket --socket-perm=0666
-Socket path: /tmp/.ydotool_socket
-Socket permission: 0666
-READY
-WARNING: running xinput against an Xwayland server. See the xinput man page for details.
-unable to find device pointer:ydotoold virtual device
-^C⏎                                                                                                                                                                                            
-
-
-kunnp eopm xap=ppn
+hello from ydotool round two

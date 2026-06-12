@@ -1,15 +1,154 @@
-=== part 1: portal denial log capture (no elevation needed) ===
-$ python3 /tmp/vw-recon-screencast.py
-EXCEPTION at CreateSession: g-io-error-quark: GDBus.Error:org.freedesktop.portal.Error.NotAllowed: Location services disabled (36)
+=== part 2: identify ydotool virtual device ===
 
---- portal-kde journal during the probe ---
+$ grep -B1 -A4 -i ydotool /proc/bus/input/devices
+I: Bus=0006 Vendor=2333 Product=6666 Version=0001
+N: Name="ydotoold virtual device"
+P: Phys=
+S: Sysfs=/devices/virtual/input/input39
+U: Uniq=
+H: Handlers=sysrq kbd event256 mouse5 rfkill 
 
-ydotool already installed.
-$ which ydotool ydotoold
-/usr/bin/ydotool
-/usr/bin/ydotoold
-$ pgrep -af ydotoold
-66508 sudo ydotoold --socket-path=/tmp/.ydotool_socket --socket-perm=0666
-66510 sudo ydotoold --socket-path=/tmp/.ydotool_socket --socket-perm=0666
-66511 ydotoold --socket-path=/tmp/.ydotool_socket --socket-perm=0666
-user answer: n
+ydotool device id (vendor:product) = 2333:6666
+=== part 3: current keyd config ===
+default.conf
+enthium
+global
+mirror
+qwerty
+reddragon.conf
+symbols
+
+--- /etc/keyd/default.conf ---
+[ids]
+*
+# the mouse
+046d:c08b
+# reddragon
+-062a:38b3
+-062a:8555
+# keyd_mirror_bridge
+-0001:0001
+
+-0000:0006
+
+
+[main]
+leftshift+rightshift = capslock
+# fix copilot key
+f23+leftshift+leftmeta = rightcontrol
+
+
+# includes
+include global
+include enthium
+include symbols
+include qwerty
+include mirror
+
+--- /etc/keyd/reddragon.conf ---
+[ids]
+# the keyboard
+062a:38b3
+062a:8555
+
+# keyd_mirror_bridge
+0001:0001
+
+include global
+include enthium
+include symbols
+include qwerty
+include mirror
+
+
+
+[enthium:layout]
+rightalt = layer(altgr)
+# have space do mirror instead
+space = lettermod(mirrored, space, 5, 200)
+# have leftmeta do symbols instead
+leftmeta = lettermod(symbols, enter, 5, 200)
+kp4 = w
+
+# keyd_mirror_bridge
+f24 = layer(mirrored)
+
+# for mode 3/gamemode
+enter = layer(enthium_shift)
+rightmeta = space
+rightshift = overload(qwerty_control, escape)
+rightcontrol = rightcontrol
+
+# for qwerty mode/m4
+f9 = noop
+f10 = noop
+f11 = noop
+f12 = toggle(qwerty)
+[qwerty]
+f9 = toggle(qwerty)
+f10 = toggle(qwerty)
+f11 = toggle(qwerty)
+f12 = noop
+enter = enter
+# leftalt
+rightmeta = rightmeta
+# rightalt
+leftcontrol = rightcontrol
+leftshift = layer(shift)
+capslock = layer(control)
+
+[symbols]
+leftshift = layer(mirrored)
+
+[mirrored]
+kp4 = enter
+rightalt = overload(qwerty, toggle(qwerty))
+
+=== part 4: add exclusion to keyd config ===
+
+Edit /etc/keyd/default.conf (or whichever .conf you actually use)
+and ensure it has an [ids] section that excludes ydotool:
+
+    [ids]
+    *
+    -2333:6666
+
+If your config already has [ids] *, add the '-2333:6666' line.
+If it has explicit IDs instead of '*', do nothing here — keyd
+already isn't grabbing ydotool because it isn't in the include list.
+If you don't have an [ids] section at all, prepend the three-line
+block above to the file.
+
+You can do this in any editor; example:
+
+    sudoedit /etc/keyd/default.conf
+
+After editing, reload keyd:
+
+    sudo systemctl restart keyd
+
+=== part 5: verify exclusion ===
+$ journalctl -u keyd --since "1 minute ago" --no-pager
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: CONFIG: parsing /etc/keyd/reddragon.conf
+Jun 12 12:13:12 Legion-Laptop keyd[2642]:         WARNING: /etc/keyd/reddragon.conf:31: qwerty_control is not a valid layer
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: CONFIG: parsing /etc/keyd/default.conf
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: ignoring 0000:0006:bdb72f48  (Video Bus)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: ignoring 0000:0006:bdb72f48  (Video Bus)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: match    0000:0000:ef47740f  /etc/keyd/default.conf        (Ideapad extra buttons)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: ignoring 048d:c992:66b4a073  (ITE Tech. Inc. ITE Device(8176) Wireless Radio Control)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: match    048d:c992:282b4a91  /etc/keyd/default.conf        (ITE Tech. Inc. ITE Device(8176) Keyboard)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: ignoring 04f3:327e:635eeda0  (ELAN06FA:00 04F3:327E Touchpad)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: ignoring 04f3:327e:80be382c  (ELAN06FA:00 04F3:327E Mouse)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: match    062a:38b3:dde25194  /etc/keyd/reddragon.conf        (MosArt USB 2.4G Keyboard System Control)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: match    062a:38b3:ad4eb996  /etc/keyd/reddragon.conf        (MosArt USB 2.4G Keyboard Consumer Control)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: match    062a:38b3:b62e6abc  /etc/keyd/reddragon.conf        (MosArt USB 2.4G Keyboard Mouse)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: match    062a:38b3:1e2b17ae  /etc/keyd/reddragon.conf        (MosArt USB 2.4G Keyboard)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: match    048d:c994:bfde768a  /etc/keyd/default.conf        (ITE Tech. Inc. ITE Device(8295) Keyboard)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: match    046d:c08b:e2564997  /etc/keyd/default.conf        (Logitech G502 HERO Gaming Mouse Keyboard)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: match    046d:c08b:15ad94e9  /etc/keyd/default.conf        (Logitech G502 HERO Gaming Mouse)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: match    0001:0001:09b4e68d  /etc/keyd/reddragon.conf        (AT Translated Set 2 keyboard)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: ignoring 0000:0001:48a093aa  (Power Button)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: ignoring 0000:0001:48a093aa  (Power Button)
+Jun 12 12:13:12 Legion-Laptop keyd[2642]: DEVICE: ignoring 2333:6666:e7fb73a9  (ydotoold virtual device)
+=== part 6: re-test ydotool ===
+user answer: y
