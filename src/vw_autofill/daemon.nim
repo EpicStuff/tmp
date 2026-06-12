@@ -9,7 +9,7 @@
 ##     Called by the hotkey wrapper. We play the cached match's
 ##     sequence through ydotool. No reply args.
 
-import std/[os, options]
+import std/[os, options, json]
 import dbus
 import dbus/lowlevel
 import ./[rule, match, typing, linux_consts]
@@ -47,6 +47,12 @@ const introspectionXml = """<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Obj
       <arg type="s" name="item_id" direction="in"/>
       <arg type="s" name="uri"     direction="in"/>
     </method>
+    <method name="ListRules">
+      <arg type="as" name="lines" direction="out"/>
+    </method>
+    <method name="Status">
+      <arg type="s" name="json" direction="out"/>
+    </method>
   </interface>
   <interface name="org.freedesktop.DBus.Introspectable">
     <method name="Introspect">
@@ -74,6 +80,10 @@ type
     addUriProc*: proc(itemId, uri: string) {.closure.}
       ## Lets capture clients append a URI to a vault item via the
       ## daemon — again so only the daemon needs vault access.
+    statusProc*: proc(): JsonNode {.closure.}
+      ## Returns the daemon's view of `bw status` (it has the unlocked
+      ## session). Lets `vw-autofill status` work without the caller
+      ## needing BW_SESSION.
 
 proc log(d: Daemon, line: string) =
   ## Single sink for human-readable status. Stderr by default; if
@@ -196,6 +206,51 @@ proc handleListItems(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
     bus.sendErrorReply(incoming, "ListItems failed: " & e.msg)
   true
 
+proc handleListRules(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
+  ## Render each bound rule as a single human-readable line; clients
+  ## just print. Keeps display formatting on the daemon so we don't
+  ## have to repeat it across multiple clients.
+  var lines: seq[string]
+  for br in d.rules:
+    let r = br.rule
+    let scheme = $r.scheme
+    let exeRepr = if r.exe.len == 0: "<empty>" else: r.exe
+    var line = scheme & "://" & exeRepr &
+      "  item=" & br.credential.itemName &
+      "  mode=" & $r.mode
+    if r.title.len > 0:      line &= "  title=" & r.title
+    if r.titleRegex.len > 0: line &= "  title_regex=" & r.titleRegex
+    if r.class.len > 0:      line &= "  class=" & r.class
+    if r.text.len > 0:       line &= "  text=" & r.text
+    if r.unsafe:             line &= "  unsafe=1"
+    lines.add line
+  bus.sendReply(incoming, @[asDbusValue(lines)])
+  true
+
+proc handleStatus(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
+  ## Returns a JSON string with daemon health + vault status + the
+  ## last-seen window. Single string return keeps the wire signature
+  ## stable as we add fields.
+  var obj = newJObject()
+  obj["pid"] = newJInt(getCurrentProcessId())
+  obj["rules"] = newJInt(d.rules.len)
+  if d.statusProc != nil:
+    try:
+      obj["vault"] = d.statusProc()
+    except CatchableError as e:
+      obj["vault_error"] = newJString(e.msg)
+  var lw = newJObject()
+  lw["exe"] = newJString(d.lastWindow.exePath)
+  lw["title"] = newJString(d.lastWindow.title)
+  lw["class"] = newJString(d.lastWindow.class)
+  obj["last_window"] = lw
+  if d.lastMatch.isSome:
+    obj["last_match"] = newJString(d.lastMatch.get.credential.itemName)
+  else:
+    obj["last_match"] = newJNull()
+  bus.sendReply(incoming, @[asDbusValue($obj)])
+  true
+
 proc handleAddUriToItem(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
   if d.addUriProc == nil:
     bus.sendErrorReply(incoming, "AddUriToItem not supported")
@@ -241,6 +296,10 @@ proc dispatch(d: Daemon, kind: IncomingMessageType, incoming: IncomingMessage): 
       return d.handleListItems(d.bus, incoming)
     of "AddUriToItem":
       return d.handleAddUriToItem(d.bus, incoming)
+    of "ListRules":
+      return d.handleListRules(d.bus, incoming)
+    of "Status":
+      return d.handleStatus(d.bus, incoming)
     else:
       d.bus.sendErrorReply(incoming, "unknown method " & name)
       return true
@@ -396,6 +455,26 @@ proc sendAddUriToItem*(itemId, uri: string) =
   let reply = pending.waitForReply()
   defer: reply.close()
   reply.raiseIfError()
+
+proc sendListRules*(): seq[string] =
+  let bus = getBus(DBUS_BUS_SESSION)
+  var msg = makeCall(BusName, ObjPath.ObjectPath, IfaceName, "ListRules")
+  let pending = bus.sendMessageWithReply(msg)
+  let reply = pending.waitForReply()
+  defer: reply.close()
+  reply.raiseIfError()
+  var iter = reply.iterate()
+  result = iter.unpackCurrent(seq[string])
+
+proc sendStatus*(): string =
+  let bus = getBus(DBUS_BUS_SESSION)
+  var msg = makeCall(BusName, ObjPath.ObjectPath, IfaceName, "Status")
+  let pending = bus.sendMessageWithReply(msg)
+  let reply = pending.waitForReply()
+  defer: reply.close()
+  reply.raiseIfError()
+  var iter = reply.iterate()
+  result = iter.unpackCurrent(string)
 
 proc sendLastWindow*(): tuple[exe, title, cls: string] =
   ## Client side: ask the daemon what window it most recently saw

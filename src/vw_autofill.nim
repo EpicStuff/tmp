@@ -12,28 +12,26 @@
 import std/[os, json, strutils, uri, osproc, streams]
 import vw_autofill/[vault, rule, daemon, linux_consts]
 
+proc requireDaemon() =
+  try:
+    discard sendIntrospect()
+  except CatchableError as e:
+    stderr.writeLine "Daemon not reachable: " & e.msg
+    stderr.writeLine "Start it first: ./bin/vw_autofill daemon"
+    quit 1
+
 proc cmdStatus() =
-  let session = getEnv("BW_SESSION")
-  let b = newBwBackend(session)
-  let s = b.status()
-  echo s.pretty
+  requireDaemon()
+  let raw = sendStatus()
+  echo parseJson(raw).pretty
 
 proc cmdList() =
-  let session = getEnv("BW_SESSION")
-  let b = newBwBackend(session)
-  let rules = b.collectRules()
-  if rules.len == 0:
+  requireDaemon()
+  let lines = sendListRules()
+  if lines.len == 0:
     echo "no vw-autofill rules found"
     return
-  for br in rules:
-    let r = br.rule
-    let scheme = ($r.scheme)
-    let exeRepr = if r.exe.len == 0: "<empty>" else: r.exe
-    echo scheme & "://" & exeRepr,
-      "  item=", br.credential.itemName,
-      "  mode=", $r.mode,
-      (if r.title.len > 0: "  title=" & r.title else: ""),
-      (if r.class.len > 0: "  class=" & r.class else: "")
+  for l in lines: echo l
 
 proc bwUnlockInteractive(): string =
   ## Spawn `bw unlock --raw` with the prompt routed to /dev/tty so the
@@ -169,6 +167,7 @@ proc cmdDaemon() =
   d.listLoginsProc = proc(): seq[Credential] = backend.listLogins()
   d.addUriProc     = proc(itemId, uri: string) =
     bwAddUriToItem(itemId, uri, sessionCopy)
+  d.statusProc     = proc(): JsonNode = backend.status()
   d.serve()
 
 proc cmdReload() =
