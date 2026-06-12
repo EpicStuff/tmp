@@ -141,19 +141,21 @@ proc cmdInstallKwinScript() =
     quit 1
   echo "installed."
 
-  let (_, eCode) = runCheck(
-    "kwriteconfig6 --file kwinrc --group Plugins " &
-    "--key vw-autofill-watcherEnabled true")
-  if eCode == 0:
-    echo "enabled in ~/.config/kwinrc."
-  else:
-    echo "(could not auto-enable; tick it in System Settings -> Window Management -> KWin Scripts)"
-
-  discard runCheck("qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.stop")
+  # In Plasma 6, Scripting.start alone won't reload code of an
+  # already-enabled script. The reliable reload pattern is:
+  #   disable in kwinrc -> Scripting.start (Plasma unloads)
+  #   enable  in kwinrc -> Scripting.start (Plasma reloads with new code)
+  echo "reloading script (disable -> start -> enable -> start)..."
+  discard runCheck("kwriteconfig6 --file kwinrc --group Plugins " &
+                   "--key vw-autofill-watcherEnabled false")
+  discard runCheck("qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start")
+  sleep(500)
+  discard runCheck("kwriteconfig6 --file kwinrc --group Plugins " &
+                   "--key vw-autofill-watcherEnabled true")
   let (rOut, rCode) = runCheck(
     "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start")
   if rCode == 0:
-    echo "KWin script engine stopped + started."
+    echo "script reloaded."
   else:
     stderr.writeLine "qdbus6 reload failed: " & rOut
 
@@ -161,8 +163,8 @@ proc cmdInstallKwinScript() =
   echo "Default Fill shortcut is Meta+Alt+V. Rebind in:"
   echo "    System Settings -> Shortcuts (search 'vw-autofill')"
   echo ""
-  echo "Diagnostic: the script reports its load/registerShortcut state"
-  echo "via the daemon log. Tail it:"
+  echo "Diagnostic: the script's load/registerShortcut state goes to"
+  echo "the daemon log under [kwin-script]. Tail it:"
   echo "    tail -f /tmp/vw-autofill-daemon.log | grep kwin-script"
 
 proc cmdUninstallKwinScript() =
