@@ -31,6 +31,11 @@ const introspectionXml = """<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Obj
       <arg type="u" name="pid"   direction="in"/>
     </method>
     <method name="Fill"/>
+    <method name="LastWindow">
+      <arg type="s" name="exe"   direction="out"/>
+      <arg type="s" name="title" direction="out"/>
+      <arg type="s" name="class" direction="out"/>
+    </method>
   </interface>
   <interface name="org.freedesktop.DBus.Introspectable">
     <method name="Introspect">
@@ -132,6 +137,14 @@ proc handleIntrospect(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
   bus.sendReply(incoming, @[asDbusValue(introspectionXml)])
   true
 
+proc handleLastWindow(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
+  bus.sendReply(incoming, @[
+    asDbusValue(d.lastWindow.exePath),
+    asDbusValue(d.lastWindow.title),
+    asDbusValue(d.lastWindow.class),
+  ])
+  true
+
 proc dispatch(d: Daemon, kind: IncomingMessageType, incoming: IncomingMessage): bool =
   let iface = incoming.interfaceName
   let name  = incoming.name
@@ -147,6 +160,8 @@ proc dispatch(d: Daemon, kind: IncomingMessageType, incoming: IncomingMessage): 
       discard d.handleFill()
       d.bus.sendReply(incoming, @[])
       return true
+    of "LastWindow":
+      return d.handleLastWindow(d.bus, incoming)
     else:
       d.bus.sendErrorReply(incoming, "unknown method " & name)
       return true
@@ -264,3 +279,19 @@ proc sendWindowActivated*(exe, title, cls: string, pid: uint32) =
   let reply = pending.waitForReply()
   defer: reply.close()
   reply.raiseIfError()
+
+proc sendLastWindow*(): tuple[exe, title, cls: string] =
+  ## Client side: ask the daemon what window it most recently saw
+  ## activated. Used by the capture flow.
+  let bus = getBus(DBUS_BUS_SESSION)
+  var msg = makeCall(BusName, ObjPath.ObjectPath, IfaceName, "LastWindow")
+  let pending = bus.sendMessageWithReply(msg)
+  let reply = pending.waitForReply()
+  defer: reply.close()
+  reply.raiseIfError()
+  var iter = reply.iterate()
+  result.exe = iter.unpackCurrent(string)
+  iter.advanceIter()
+  result.title = iter.unpackCurrent(string)
+  iter.advanceIter()
+  result.cls = iter.unpackCurrent(string)

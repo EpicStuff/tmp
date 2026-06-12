@@ -9,7 +9,7 @@
 ##
 ## More to come (capture, unlock helper).
 
-import std/[os, json, strutils]
+import std/[os, json, strutils, uri]
 import vw_autofill/[vault, rule, daemon, linux_consts]
 
 proc cmdStatus() =
@@ -67,6 +67,61 @@ proc cmdSimulate() =
   echo "sent WindowActivated(exe=", exe, ", title=", title,
        ", class=", cls, ", pid=", pid, ")"
 
+proc promptDefault(prompt, default: string): string =
+  stdout.write(prompt)
+  if default.len > 0: stdout.write(" [" & default & "]")
+  stdout.write(": ")
+  stdout.flushFile()
+  let line = readLine(stdin).strip()
+  if line.len == 0: default else: line
+
+proc cmdCapture() =
+  ## Interactive rule-creation flow. Focus the target window, then
+  ## answer a few prompts; we print a URI you can paste into a vault
+  ## item's login URIs.
+  let delay = 5
+  echo "Focus the target window in the next ", delay, " seconds."
+  for i in countdown(delay, 1):
+    stdout.write("  ", i, "...")
+    stdout.flushFile()
+    sleep(1000)
+  echo ""
+  let win = sendLastWindow()
+  if win.exe.len == 0 and win.title.len == 0:
+    echo "Daemon has not seen any window activation yet."
+    echo "Is the daemon running and is the KWin watcher script enabled?"
+    quit 1
+  echo "Captured:"
+  echo "  exe   = ", win.exe
+  echo "  title = ", win.title
+  echo "  class = ", win.cls
+  echo ""
+
+  let seqStr     = promptDefault("Sequence", "$user$tab$pass")
+  let titleMatch = promptDefault("Title substring matcher (empty = none)", "")
+  let useClass   = promptDefault("Add class matcher? (y/N)", "n").toLowerAscii()
+  let modeStr    = promptDefault("Mode (hotkey/auto)", "hotkey").toLowerAscii()
+
+  var qparts: seq[string]
+  if titleMatch.len > 0:
+    qparts.add "title=" & encodeUrl(titleMatch, usePlus = false)
+  if useClass == "y" or useClass == "yes":
+    qparts.add "class=" & encodeUrl(win.cls, usePlus = false)
+  qparts.add "seq=" & encodeUrl(seqStr, usePlus = false)
+  if modeStr == "auto":
+    qparts.add "mode=auto"
+    # auto without any matcher needs unsafe=1 to pass isSafe
+    if titleMatch.len == 0 and (useClass != "y" and useClass != "yes"):
+      qparts.add "unsafe=1"
+  let q = if qparts.len > 0: "?" & qparts.join("&") else: ""
+  let uriStr = "linapp://" & win.exe & q
+  echo ""
+  echo "Add this URI to a vault item's login URIs:"
+  echo "  ", uriStr
+  echo ""
+  echo "After saving in the vault, run `bw sync`, then restart the daemon"
+  echo "so it reloads rules."
+
 proc usage() =
   echo """vw-autofill — Bitwarden/Vaultwarden desktop autofill
 
@@ -78,6 +133,7 @@ Commands:
     status                print bw vault status JSON
     daemon                run the session-bus daemon (needs BW_SESSION)
     fill                  tell a running daemon to fire its cached match
+    capture               interactive rule builder for the focused window
     introspect            fetch the daemon's introspection XML
     simulate EXE TITLE [CLASS] [PID]
                           synthesize a WindowActivated D-Bus call
@@ -98,6 +154,7 @@ when isMainModule:
   of "status":     cmdStatus()
   of "daemon":     cmdDaemon()
   of "fill":       cmdFill()
+  of "capture":    cmdCapture()
   of "introspect": cmdIntrospect()
   of "simulate":   cmdSimulate()
   of "help", "--help", "-h": usage()
