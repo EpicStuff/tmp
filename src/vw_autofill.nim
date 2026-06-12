@@ -35,15 +35,10 @@ proc cmdList() =
       (if r.title.len > 0: "  title=" & r.title else: ""),
       (if r.class.len > 0: "  class=" & r.class else: "")
 
-proc readBwSession(): string =
-  ## Get a vault session token. Priority:
-  ##   1. BW_SESSION env if non-empty
-  ##   2. spawn `bw unlock --raw` interactively
-  ## bw's password prompt goes to /dev/tty directly (Node inquirer),
-  ## so we just need to capture stdout for the session token.
-  let env = getEnv("BW_SESSION")
-  if env.len > 0:
-    return env
+proc bwUnlockInteractive(): string =
+  ## Spawn `bw unlock --raw` with the prompt routed to /dev/tty so the
+  ## user types their master password directly. Capture stdout for the
+  ## session token.
   stderr.writeLine "Unlocking vault (bw unlock --raw)..."
   let p = startProcess(
     "bw unlock --raw 2>/dev/tty </dev/tty",
@@ -55,6 +50,28 @@ proc readBwSession(): string =
   if code != 0 or token.len == 0:
     raise newException(IOError, "bw unlock failed (exit " & $code & ")")
   result = token
+
+proc verifySession(token: string): bool =
+  if token.len == 0: return false
+  try:
+    let b = newBwBackend(token)
+    let s = b.status()
+    return s{"status"}.getStr == "unlocked"
+  except CatchableError:
+    return false
+
+proc readBwSession(): string =
+  ## Get a vault session token:
+  ##   1. BW_SESSION env, *verified* against `bw status` (so a stale
+  ##      env from a previous session doesn't silently make every bw
+  ##      call fail with "Vault is locked")
+  ##   2. otherwise spawn `bw unlock --raw` interactively
+  let env = getEnv("BW_SESSION")
+  if env.len > 0 and verifySession(env):
+    return env
+  if env.len > 0:
+    stderr.writeLine "BW_SESSION env is set but session is not unlocked."
+  bwUnlockInteractive()
 
 proc warnIfNoYdotoold(socket: string) =
   if not fileExists(socket):
@@ -139,16 +156,20 @@ proc fzfPick(prompt: string, choices: openArray[string]): string =
 
 proc cmdCapture() =
   ## Interactive rule-creation flow.
-  ##   1. countdown so user can focus the target window
-  ##   2. fetch lastWindow from daemon
-  ##   3. fzf-pick the vault item to attach the URI to
-  ##   4. prompt for sequence / matchers / mode
-  ##   5. push URI into the vault item via bw edit
-  ##   6. tell the daemon to reload — no manual restart
-  let session = getEnv("BW_SESSION")
-  if session.len == 0:
-    stderr.writeLine "BW_SESSION required"
+  ##   1. fail-fast checks: daemon reachable, vault unlocked
+  ##   2. countdown so user can focus the target window
+  ##   3. fetch lastWindow from daemon
+  ##   4. fzf-pick the vault item to attach the URI to
+  ##   5. prompt for sequence / matchers / mode
+  ##   6. push URI into the vault item via bw edit
+  ##   7. tell the daemon to reload — no manual restart
+  try:
+    discard sendIntrospect()
+  except CatchableError as e:
+    stderr.writeLine "Daemon not reachable: " & e.msg
+    stderr.writeLine "Start it first: ./bin/vw_autofill daemon"
     quit 1
+  let session = readBwSession()
 
   let delay = 5
   echo "Focus the target window in the next ", delay, " seconds."
@@ -160,7 +181,8 @@ proc cmdCapture() =
   let win = sendLastWindow()
   if win.exe.len == 0 and win.title.len == 0:
     echo "Daemon has not seen any window activation yet."
-    echo "Is the daemon running and is the KWin watcher script enabled?"
+    echo "Is the KWin watcher script enabled and reloaded?"
+    echo "    qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start"
     quit 1
   echo "Captured:"
   echo "  exe   = ", win.exe

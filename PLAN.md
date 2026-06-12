@@ -80,18 +80,16 @@ vw-autofill daemon              # [DONE] long-running. If BW_SESSION env is unse
 vw-autofill fill                # [DONE] one-shot: signal daemon to fill now
 vw-autofill unlock              # [TODO] read session token from stdin, hand to daemon
 vw-autofill unlock-interactive  # [TODO] spawn terminal running 'bw unlock --raw | vw-autofill unlock'
-vw-autofill capture             # [DONE] interactive add flow (named 'capture' not 'add')
-vw-autofill add-interactive     # [TODO] spawn terminal running 'vw-autofill capture'
+vw-autofill capture             # [DONE] interactive add flow (also subsumes the planned 'add-interactive';
+                                #        edit / delete dropped from scope — vault items are editable in the
+                                #        Bitwarden web UI, no need to re-implement that here)
 vw-autofill list                # [DONE] list configured rules
-vw-autofill edit <name>         # [TODO] tweak a rule
-vw-autofill delete <name>       # [TODO] remove a rule from an item
 vw-autofill status              # [DONE] partial: prints bw status JSON; daemon health/last-fire still pending
 vw-autofill reload              # [DONE-NEW] tell daemon to refetch rules from bw (not originally in this list)
 vw-autofill introspect          # [DONE-NEW] fetch daemon's introspection XML
 vw-autofill simulate ...        # [DONE-NEW] synthesize WindowActivated D-Bus call
 vw-autofill snapshot            # [TODO] print current foreground snapshot (debug)
 vw-autofill match               # [TODO] print which rules would match the foreground
-vw-autofill fill --dry-run      # [TODO] render the sequence ops but don't type
 vw-autofill doctor              # [TODO] environment self-check, see §15a
 vw-autofill enable-autostart    # [TODO]
 vw-autofill disable-autostart   # [TODO]
@@ -104,9 +102,11 @@ client that talks to it via local IPC. The daemon **never owns a
 terminal** — interactive prompts run in the client (any terminal, or
 one spawned by the `-interactive` variants).
 
-The debug trio (`snapshot`, `match`, `fill --dry-run`) prints the
-daemon's view of the foreground without typing — the first thing to
-reach for when something doesn't fire.
+The debug pair (`snapshot`, `match`) prints the daemon's view of the
+foreground without typing — the first thing to reach for when
+something doesn't fire. (`fill --dry-run` was dropped; the daemon log
+already shows match decisions, and `simulate` covers the "what would
+match" case from the other direction.)
 
 **IPC** wrapped behind a `Bus` interface:
 
@@ -1108,17 +1108,21 @@ field-check / ambiguity handling [TODO].
 
 ### Slice 5 — Capture / add flow
 
-**Status:** capture [DONE]; edit / delete / add-interactive [TODO].
+**Status:** capture [DONE]; edit / delete / add-interactive dropped
+from v1 scope.
 
 - `vw-autofill capture` — [DONE]. Inline in `src/vw_autofill.nim`
-	(no separate `capture.nim`). Flow: 5-sec focus countdown → fetch
-	`lastWindow` from daemon via `LastWindow()` → fzf-pick a vault item
-	→ prompt for sequence / matchers / mode (fzf for the binary
-	choices) → build URI → `bw edit item` via `bwAddUriToItem` →
-	`Reload` the daemon. No paste, no `bw sync`, no daemon restart.
-- `vw-autofill edit` / `delete` — [TODO].
-- `vw-autofill add-interactive` (spawn terminal) — [TODO]. Today
-	`capture` runs in whatever terminal launched it.
+	(no separate `capture.nim`). Flow: ping daemon → verify or prompt
+	for session token → 5-sec focus countdown → fetch `lastWindow` from
+	daemon via `LastWindow()` → fzf-pick a vault item → prompt for
+	sequence / matchers / mode (fzf for the binary choices) → build URI
+	→ `bw edit item` via `bwAddUriToItem` → `Reload` the daemon. No
+	paste, no `bw sync`, no daemon restart.
+- `vw-autofill edit` / `delete` — [DROPPED]. Vault items are editable
+	via the Bitwarden web UI; not worth re-implementing URI mutation in
+	our CLI when the user already has a good editor.
+- `vw-autofill add-interactive` (spawn terminal) — [DROPPED]. `capture`
+	itself is interactive enough.
 - `test_capture.nim` — [TODO].
 
 ### Slice 6 — Linux smoke + user validation
