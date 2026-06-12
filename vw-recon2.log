@@ -1,0 +1,162 @@
+
+=== xdg-desktop-portal-kde version ===
+$ pacman -Q xdg-desktop-portal xdg-desktop-portal-kde plasma-workspace kwin
+xdg-desktop-portal 1.22.0-1
+xdg-desktop-portal-kde 6.6.5-1
+plasma-workspace 6.6.5-2
+kwin 6.6.5-4
+
+=== kde.portal manifest (what interfaces does kde backend implement?) ===
+
+--- /usr/share/xdg-desktop-portal/portals/kde.portal ---
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.kde
+Interfaces=org.freedesktop.impl.portal.Access;org.freedesktop.impl.portal.Account;org.freedesktop.impl.portal.AppChooser;org.freedesktop.impl.portal.Background;org.freedesktop.impl.portal.Email;org.freedesktop.impl.portal.FileChooser;org.freedesktop.impl.portal.Inhibit;org.freedesktop.impl.portal.Notification;org.freedesktop.impl.portal.Print;org.freedesktop.impl.portal.ScreenCast;org.freedesktop.impl.portal.Screenshot;org.freedesktop.impl.portal.RemoteDesktop;org.freedesktop.impl.portal.Settings;org.freedesktop.impl.portal.DynamicLauncher;org.freedesktop.impl.portal.GlobalShortcuts;org.freedesktop.impl.portal.InputCapture;org.freedesktop.impl.portal.Clipboard;org.freedesktop.impl.portal.Wallpaper;org.freedesktop.impl.portal.Usb
+UseIn=KDE
+
+=== portal hub config (which backend is selected for RemoteDesktop?) ===
+
+--- /usr/share/xdg-desktop-portal/kde-portals.conf ---
+[preferred]
+default=kde
+org.freedesktop.impl.portal.Settings=kde;gtk;
+org.freedesktop.impl.portal.Secret=kwallet
+XDG_CURRENT_DESKTOP=KDE
+
+=== is there a system-wide "Location services" / privacy toggle? ===
+$ gsettings list-schemas
+io.missioncenter.MissionCenter
+net.nokyan.Resources
+org.freedesktop.pulseaudio.module-groups
+org.gnome.Firmware
+org.gnome.crypto.pgp
+org.gnome.desktop.a11y
+org.gnome.desktop.a11y.applications
+org.gnome.desktop.a11y.interface
+org.gnome.desktop.a11y.keyboard
+org.gnome.desktop.a11y.magnifier
+org.gnome.desktop.a11y.mouse
+org.gnome.desktop.app-folders
+org.gnome.desktop.background
+org.gnome.desktop.break-reminders
+org.gnome.desktop.break-reminders.eyesight
+org.gnome.desktop.break-reminders.movement
+org.gnome.desktop.calendar
+org.gnome.desktop.datetime
+org.gnome.desktop.default-applications
+org.gnome.desktop.default-applications.office
+org.gnome.desktop.default-applications.office.calendar
+org.gnome.desktop.default-applications.office.tasks
+org.gnome.desktop.default-applications.terminal
+org.gnome.desktop.input-sources
+org.gnome.desktop.interface
+org.gnome.desktop.lockdown
+org.gnome.desktop.media-handling
+org.gnome.desktop.notifications
+org.gnome.desktop.peripherals
+org.gnome.desktop.peripherals.keyboard
+org.gnome.desktop.peripherals.mouse
+org.gnome.desktop.peripherals.pointingstick
+org.gnome.desktop.peripherals.touchpad
+org.gnome.desktop.peripherals.trackball
+org.gnome.desktop.privacy
+org.gnome.desktop.screen-time-limits
+org.gnome.desktop.screensaver
+org.gnome.desktop.search-providers
+org.gnome.desktop.session
+org.gnome.desktop.sound
+org.gnome.desktop.thumbnail-cache
+org.gnome.desktop.thumbnailers
+org.gnome.desktop.wm.keybindings
+org.gnome.desktop.wm.preferences
+org.gnome.meld
+org.gnome.meld.WindowState
+org.gnome.system.locale
+org.gnome.system.location
+org.gnome.system.proxy
+org.gnome.system.proxy.ftp
+org.gnome.system.proxy.http
+org.gnome.system.proxy.https
+org.gnome.system.proxy.socks
+org.gtk.Settings.ColorChooser
+org.gtk.Settings.Debug
+org.gtk.Settings.EmojiChooser
+org.gtk.Settings.FileChooser
+org.gtk.gtk4.Inspector.Recorder
+org.gtk.gtk4.Settings.ColorChooser
+org.gtk.gtk4.Settings.Debug
+org.gtk.gtk4.Settings.EmojiChooser
+org.gtk.gtk4.Settings.FileChooser
+org.virt-manager.virt-manager
+org.virt-manager.virt-manager.confirm
+org.virt-manager.virt-manager.connections
+org.virt-manager.virt-manager.console
+org.virt-manager.virt-manager.details
+org.virt-manager.virt-manager.new-vm
+org.virt-manager.virt-manager.paths
+org.virt-manager.virt-manager.stats
+org.virt-manager.virt-manager.urls
+org.virt-manager.virt-manager.vmlist-fields
+yad.settings
+yad.sourceview
+
+--- grep privacy/remote in /home/derek/.home/.config/kwinrc ---
+
+--- grep privacy/remote in /home/derek/.home/.config/kdeglobals ---
+EnableRemoteFolderThumbnail=false
+MaximumRemoteSize=0
+
+=== Screencast portal sibling test ===
+If Screencast also refuses, the deny is at the hub/policy level
+(applies to all input-forwarding-style portals).
+If Screencast works but RemoteDesktop refuses, the deny is
+RemoteDesktop-specific (probably kde backend's own permission check).
+
+Run:
+    python3 /tmp/vw-recon-screencast.py
+
+=== ydotool availability (fallback typing path) ===
+$ pacman -Si ydotool
+Repository      : extra
+Name            : ydotool
+Version         : 1.0.4-2
+Description     : Generic command-line automation tool (no X!)
+Architecture    : x86_64
+URL             : https://github.com/ReimuNotMoe/ydotool
+Licenses        : AGPL3
+Groups          : None
+Provides        : None
+Depends On      : glibc
+Optional Deps   : None
+Conflicts With  : None
+Replaces        : None
+Download Size   : 16.02 KiB
+Installed Size  : 43.99 KiB
+Packager        : T.J. Townsend <blakkheim@archlinux.org>
+Build Date      : Sat 13 Jul 2024 11:55:10 PM
+Validated By    : SHA-256 Sum  Signature
+
+$ pacman -Q ydotool
+error: package 'ydotool' was not found
+$ ls -l /dev/uinput
+crw-rw----+ 1 root root 10, 223 Jun 12 11:27 /dev/uinput
+$ getent group input
+input:x:994:brltty
+current user in input group? no
+
+=== KWin script Workspace introspection (does KWin offer input emulation directly?) ===
+Enable "vw-recon2" in System Settings -> KWin Scripts.
+
+=== summary ===
+
+1. Run:
+     python3 /tmp/vw-recon-screencast.py
+
+2. Enable "vw-recon2" KWin script in System Settings, then:
+     journalctl --user --since "2 minutes ago" --no-pager | grep vw-recon2
+   (and re-run the original KWin script the same way:
+     journalctl --user --since "10 minutes ago" --no-pager | grep vw-recon
+   the original log filter was wrong — my mistake.)
+   Disable both when done.
+
+3. Paste /tmp/vw-recon2.log plus the two outputs above.

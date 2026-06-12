@@ -1,114 +1,150 @@
+  /home/derek/Downloads/tmp  claude/linux-foundations ?2                                                                                                                                    
+❮ ./scripts/run-me-next.sh 
+=== fixing metadata.json for both KWin scripts ===
+  wrote /home/derek/.home/.local/share/kwin/scripts/vw-recon/metadata.json
+  skip vw-recon2 - directory does not exist (/home/derek/.home/.local/share/kwin/scripts/vw-recon2)
+
+=== registering with kpackagetool6 ===
+  vw-recon already registered
+
+=== registered KWin scripts ===
+vw-recon
+
+=== manual steps (cannot be scripted) ===
+
+1. Open System Settings -> Window Management -> KWin Scripts.
+   Close and reopen the pane if it was already open.
+   You should now see "vw-recon" and "vw-recon2".
+   Enable BOTH. Click Apply.
+
+2. Focus any 2-3 windows of your choice (any apps).
+
+3. Run the screencast portal probe (in a different terminal is fine):
+       python3 /tmp/vw-recon-screencast.py
+   (If the file is missing, re-run: bash scripts/recon2.sh)
+
+4. Collect the KWin script output:
+       journalctl --user --since "5 minutes ago" --no-pager | grep vw-recon
+
+5. Disable both scripts in System Settings when done.
+
+6. Paste back:
+   - the journalctl output
+   - the screencast probe output
+   - /tmp/vw-recon2.log
+
   /home/derek/Downloads/tmp  claude/linux-foundations                                                                                                                                       
-❮ bash scripts/recon.sh 
-  # using gdbus
+❮ python3 /tmp/vw-recon-screencast.py
+python3: can't open file '/tmp/vw-recon-screencast.py': [Errno 2] No such file or directory
 
-=== D-Bus session bus reachable ===
- 'org.a11y.Bus'
- 'org.freedesktop.a11y.Manager'
- 'org.freedesktop.impl.portal.desktop.gtk'
- 'org.freedesktop.impl.portal.desktop.kde'
- 'org.freedesktop.impl.portal.desktop.kwallet'
- 'org.freedesktop.impl.portal.PermissionStore'
- 'org.freedesktop.portal.Desktop'
- 'org.freedesktop.portal.Documents'
- 'org.kde.keyboard'
+  /home/derek/Downloads/tmp  claude/linux-foundations                                                                                                                                       
+❮ bash scripts/recon2.sh
 
-=== xdg-desktop-portal RemoteDesktop present + capabilities ===
-  # introspect RemoteDesktop interface
-  # AvailableDeviceTypes property
-(<uint32 7>,)
+=== xdg-desktop-portal-kde version ===
+$ pacman -Q xdg-desktop-portal xdg-desktop-portal-kde plasma-workspace kwin
+xdg-desktop-portal 1.22.0-1
+xdg-desktop-portal-kde 6.6.5-1
+plasma-workspace 6.6.5-2
+kwin 6.6.5-4
 
-=== xdg-desktop-portal GlobalShortcuts present ===
+=== kde.portal manifest (what interfaces does kde backend implement?) ===
 
-=== portal backend(s) installed ===
-  # /usr/share/xdg-desktop-portal/portals:
-gtk.portal
-kde.portal
-kwallet.portal
-4522 /usr/lib/xdg-desktop-portal
-4579 /usr/lib/xdg-desktop-portal-gtk
-4684 /usr/lib/xdg-desktop-portal-kde
+--- /usr/share/xdg-desktop-portal/portals/kde.portal ---
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.kde
+Interfaces=org.freedesktop.impl.portal.Access;org.freedesktop.impl.portal.Account;org.freedesktop.impl.portal.AppChooser;org.freedesktop.impl.portal.Background;org.freedesktop.impl.portal.Email;org.freedesktop.impl.portal.FileChooser;org.freedesktop.impl.portal.Inhibit;org.freedesktop.impl.portal.Notification;org.freedesktop.impl.portal.Print;org.freedesktop.impl.portal.ScreenCast;org.freedesktop.impl.portal.Screenshot;org.freedesktop.impl.portal.RemoteDesktop;org.freedesktop.impl.portal.Settings;org.freedesktop.impl.portal.DynamicLauncher;org.freedesktop.impl.portal.GlobalShortcuts;org.freedesktop.impl.portal.InputCapture;org.freedesktop.impl.portal.Clipboard;org.freedesktop.impl.portal.Wallpaper;org.freedesktop.impl.portal.Usb
+UseIn=KDE
 
-=== AT-SPI registry reachable ===
-('unix:path=/run/user/1000/at-spi/bus_1',)
+=== portal hub config (which backend is selected for RemoteDesktop?) ===
 
-=== active keyboard layout ===
-$ localectl status
-System Locale: LANG=en_CA.UTF-8
-    VC Keymap: us
-   X11 Layout: us
-$ setxkbmap -query
-WARNING: Running setxkbmap against an Xwayland server
-rules:      evdev
-model:      pc105
-layout:     us
-(uint32 0,)
+--- /usr/share/xdg-desktop-portal/kde-portals.conf ---
+[preferred]
+default=kde
+org.freedesktop.impl.portal.Settings=kde;gtk;
+org.freedesktop.impl.portal.Secret=kwallet
+XDG_CURRENT_DESKTOP=KDE
 
-=== KWin script API probe ===
-Drop the following file into:
-    ~/.local/share/kwin/scripts/vw-recon/contents/code/main.js
+=== is there a system-wide "Location services" / privacy toggle? ===
+org.gnome.desktop.privacy
+org.gnome.system.location
 
-And the metadata file alongside it:
-    ~/.local/share/kwin/scripts/vw-recon/metadata.json
+--- grep privacy/remote in /home/derek/.home/.config/kwinrc ---
 
-Then in System Settings -> Window Management -> KWin Scripts -> enable
-"vw-recon". Focus any 2-3 windows of your choice. Then run:
-    journalctl --user -t vw-recon -n 200 --no-pager
-and paste the output.
+--- grep privacy/remote in /home/derek/.home/.config/kdeglobals ---
+EnableRemoteFolderThumbnail=false
+MaximumRemoteSize=0
 
-When done, disable the script in System Settings.
-  # KWin script staged at ~/.local/share/kwin/scripts/vw-recon/
+=== Screencast portal sibling test ===
+If Screencast also refuses, the deny is at the hub/policy level
+(applies to all input-forwarding-style portals).
+If Screencast works but RemoteDesktop refuses, the deny is
+RemoteDesktop-specific (probably kde backend's own permission check).
 
-=== portal RemoteDesktop one-shot handshake ===
-This runs a minimal CreateSession -> SelectDevices(KEYBOARD) -> Start
-sequence. Triggers the one-time portal consent dialog (click "Allow"
-when it appears). Does NOT type anything. Closes the session
-immediately afterward.
+Run:
+    python3 /tmp/vw-recon-screencast.py
 
-Run separately:
-    python3 /tmp/vw-recon-portal.py
-  # portal probe staged at /tmp/vw-recon-portal.py
-  # needs python-pydbus and python-gobject. on Arch: pacman -S python-pydbus python-gobject
+=== ydotool availability (fallback typing path) ===
+$ pacman -Si ydotool
+Repository      : extra
+Name            : ydotool
+Version         : 1.0.4-2
+Description     : Generic command-line automation tool (no X!)
+$ pacman -Q ydotool
+error: package 'ydotool' was not found
+$ ls -l /dev/uinput
+crw-rw----+ 1 root root 10, 223 Jun 12 11:27 /dev/uinput
+$ getent group input
+input:x:994:brltty
+current user in input group? no
+
+=== KWin script Workspace introspection (does KWin offer input emulation directly?) ===
+Enable "vw-recon2" in System Settings -> KWin Scripts.
 
 === summary ===
 
-Steps to complete this recon (paste outputs back):
+1. Run:
+     python3 /tmp/vw-recon-screencast.py
 
-  1. Output above (already collected in /tmp/vw-recon.log).
-  2. Enable the KWin script in System Settings, focus 2-3 windows of
-     your choice (any apps), then:
-         journalctl --user -t vw-recon -n 200 --no-pager
-     ...and disable the script when done.
-  3. Run the portal probe:
-         pacman -S python-pydbus python-gobject   # if not installed
-         python3 /tmp/vw-recon-portal.py
-     Click "Allow" on the portal consent dialog when it appears.
+2. Enable "vw-recon2" KWin script in System Settings, then:
+     journalctl --user --since "2 minutes ago" --no-pager | grep vw-recon2
+   (and re-run the original KWin script the same way:
+     journalctl --user --since "10 minutes ago" --no-pager | grep vw-recon
+   the original log filter was wrong — my mistake.)
+   Disable both when done.
 
-Paste the contents of /tmp/vw-recon.log plus the journalctl output and the portal
-probe output.
+3. Paste /tmp/vw-recon2.log plus the two outputs above.
 
   /home/derek/Downloads/tmp  claude/linux-foundations                                                                                                                                       
-❮ journalctl --user -t vw-recon -n 200 --no-pager 
--- No entries --
+❮ journalctl --user --since "5 minutes ago" --no-pager | grep vw-recon
+Jun 12 11:50:20 Legion-Laptop kwin_wayland[3977]: vw-recon connected: workspace.windowActivated
+Jun 12 11:50:20 Legion-Laptop kwin_wayland[3977]: vw-recon clientActivated not available: TypeError: Cannot call method 'connect' of undefined
+Jun 12 11:50:31 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="fish - tmp - Visual Studio Code" resourceClass="code" resourceName="code" pid=50867 internalId="{1c71f26e-12c1-41c1-9d58-b435765a77de}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:50:33 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="KWin Scripts — System Settings" resourceClass="systemsettings" resourceName="systemsettings" pid=61026 internalId="{f829c415-a662-4e3a-b3ba-4b18ae66fcba}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:50:36 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="fish - tmp - Visual Studio Code" resourceClass="code" resourceName="code" pid=50867 internalId="{1c71f26e-12c1-41c1-9d58-b435765a77de}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:50:37 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="BiglyBT" resourceClass="BiglyBT" resourceName="BiglyBT" pid=23396 internalId="{b9bc9a73-5849-4db4-93a6-d09ca8a80e72}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:50:37 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="fish - tmp - Visual Studio Code" resourceClass="code" resourceName="code" pid=50867 internalId="{1c71f26e-12c1-41c1-9d58-b435765a77de}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:51:00 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="KWin Scripts — System Settings" resourceClass="systemsettings" resourceName="systemsettings" pid=61026 internalId="{f829c415-a662-4e3a-b3ba-4b18ae66fcba}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:51:02 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="fish - tmp - Visual Studio Code" resourceClass="code" resourceName="code" pid=50867 internalId="{1c71f26e-12c1-41c1-9d58-b435765a77de}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:51:03 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="plasmashell" resourceClass="org.kde.plasmashell" resourceName="plasmashell" pid=4218 internalId="{9ebadac6-6dfe-47da-ae93-c10bea046ca4}" desktop=undefined windowType=18 windowRole="" windowClass=undefined
+Jun 12 11:51:04 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="fish - tmp - Visual Studio Code" resourceClass="code" resourceName="code" pid=50867 internalId="{1c71f26e-12c1-41c1-9d58-b435765a77de}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:51:05 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="Quick Settings — System Settings" resourceClass="systemsettings" resourceName="systemsettings" pid=61410 internalId="{cd7a52d4-fcb3-4d45-97e0-6c3121932b15}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:51:13 Legion-Laptop kwin_wayland[3977]: vw-recon2 starting
+Jun 12 11:51:13 Legion-Laptop kwin_wayland[3977]: vw-recon2 workspace keys: activeScreen,activeWindow,activities,activitiesChanged,activityAdded,activityRemoved,clientArea,constrain,createDesktop,currentActivity,currentActivityChanged,currentDesktop,currentDesktopChanged,cursorPos,cursorPosChanged,desktopGridHeight,desktopGridSize,desktopGridWidth,desktopLayoutChanged,desktops,desktopsChanged,getClient,hideOutline,isEffectActive,moveDesktop,objectName,objectNameChanged,raiseWindow,removeDesktop,rootTile,screenAt,screenOrder,screenOrderChanged,screens,screensChanged,sendClientToScreen,showOutline,slotActivateAttentionWindow,slotIncreaseWindowOpacity,slotLowerWindowOpacity,slotSwitchDesktopDown,slotSwitchDesktopLeft,slotSwitchDesktopNext,slotSwitchDesktopPrevious,slotSwitchDesktopRight,slotSwitchDesktopUp,slotSwitchToAboveScreen,slotSwitchToBelowScreen,slotSwitchToLeftScreen,slotSwitchToNextScreen,slotSwitchToPrevScreen,slotSwitchToRightScreen,slotSwitchWindowDown,slotSwitchWindowLeft,slotSwitchWindowRight,slotSwitchWindowUp,slotToggleShowDesktop,slotWindowAbove,slotWindowBelow,slotWindowClose,slotWindowExcludeFromCapture,slotWindowExpandHorizontal,slotWindowExpandVertical,slotWindowFullScreen,slotWindowLower,slotWindowMaximize,slotWindowMaximizeHorizontal,slotWindowMaximizeVertical,slotWindowMinimize,slotWindowMove,slotWindowMoveDown,slotWindowMoveLeft,slotWindowMoveRight,slotWindowMoveUp,slotWindowNoBorder,slotWindowOnAllDesktops,slotWindowOperations,slotWindowQuickTileBottom,slotWindowQuickTileBottomLeft,slotWindowQuickTileBottomRight,slotWindowQuickTileLeft,slotWindowQuickTileRight,slotWindowQuickTileTop,slotWindowQuickTileTopLeft,slotWindowQuickTileTopRight,slotWindowRaise,slotWindowRaiseOrLower,slotWindowResize,slotWindowShrinkHorizontal,slotWindowShrinkVertical,slotWindowToAboveScreen,slotWindowToBelowScreen,slotWindowToDesktopDown,slotWindowToDesktopLeft,slotWindowToDesktopRight,slotWindowToDesktopUp,slotWindowToLeftScreen,slotWindowToNextDesktop,slotWindowToNextScreen,slotWindowToPrevScreen,slotWindowToPreviousDesktop,slotWindowToRightScreen,stackingOrder,supportInformation,tilingForScreen,unconstrain,virtualScreenGeometry,virtualScreenGeometryChanged,virtualScreenSize,virtualScreenSizeChanged,windowActivated,windowAdded,windowAt,windowList,windowRemoved,workspaceHeight,workspaceSize,workspaceWidth
+Jun 12 11:51:13 Legion-Laptop kwin_wayland[3977]: vw-recon2 activeWindow keys: active,activeChanged,activities,activitiesChanged,appletPopup,applicationMenuActive,applicationMenuActiveChanged,applicationMenuChanged,borderRadiusChanged,bufferGeometry,bufferGeometryChanged,caption,captionChanged,captionNormal,captionNormalChanged,clientGeometry,clientGeometryChanged,closeWindow,closeable,closeableChanged,closed,colorScheme,colorSchemeChanged,comboBox,criticalNotification,damaged,decorationChanged,decorationHasAlpha,decorationPolicyChanged,deleted,demandsAttention,demandsAttentionChanged,description,descriptionChanged,desktopFileName,desktopFileNameChanged,desktopWindow,desktops,desktopsChanged,dialog,dndIcon,dock,dropdownMenu,excludeFromCapture,excludeFromCaptureChanged,frameGeometry,frameGeometryAboutToChange,frameGeometryChanged,fullScreen,fullScreenChanged,fullScreenable,fullscreenGeometryRestoreChanged,hasApplicationMenu,hasApplicationMenuChanged,height,hidden,hiddenByShowDesktopChanged,hiddenChanged,icon,iconChanged,iconGeometry,inputMethod,inputTransformationChanged,interactiveMoveResizeFinished,interactiveMoveResizeStarted,interactiveMoveResizeStepped,internalId,keepAbove,keepAboveChanged,keepBelow,keepBelowChanged,layer,lockScreenOverlayChanged,managed,maxSize,maximizable,maximizeGeometryRestoreChanged,maximizeMode,maximizeableChanged,maximizedAboutToChange,maximizedChanged,menu,minSize,minimizable,minimizeableChanged,minimized,minimizedChanged,modal,modalChanged,move,moveResizeCursorChanged,moveResizedChanged,moveable,moveableAcrossScreens,nextTargetScaleChanged,noBorder,normalWindow,notification,objectName,objectNameChanged,offscreenRenderingChanged,onAllDesktops,onScreenDisplay,opacity,opacityChanged,outline,output,outputChanged,paletteChanged,pid,popupMenu,popupWindow,pos,providesContextHelp,quickTileModeChanged,readyForPaintingChanged,rect,requestedTileChanged,resize,resizeable,resourceClass,resourceName,setMaximize,setReadyForPainting,shadowChanged,size,skipCloseAnimationChanged,skipPager,skipPagerChanged,skipSwitcher,skipSwitcherChanged,skipTaskbar,skipTaskbarChanged,skipsCloseAnimation,specialWindow,splash,stackingOrder,stackingOrderChanged,surfaceChanged,tag,tagChanged,targetScaleChanged,tile,tileChanged,toolbar,tooltip,transient,transientChanged,transientFor,unresponsive,unresponsiveChanged,utility,visibleGeometryChanged,wantsInput,width,windowClassChanged,windowRole,windowRoleChanged,windowType,x,y
+Jun 12 11:51:13 Legion-Laptop kwin_wayland[3977]: vw-recon2 has workspace.sendKey? undefined
+Jun 12 11:51:13 Legion-Laptop kwin_wayland[3977]: vw-recon2 has workspace.sendKeyPress? undefined
+Jun 12 11:51:13 Legion-Laptop kwin_wayland[3977]: vw-recon2 has workspace.sendInput? undefined
+Jun 12 11:51:13 Legion-Laptop kwin_wayland[3977]: vw-recon2 has workspace.injectKey? undefined
+Jun 12 11:51:13 Legion-Laptop kwin_wayland[3977]: vw-recon2 has workspace.typeText? undefined
+Jun 12 11:51:13 Legion-Laptop kwin_wayland[3977]: vw-recon2 has workspace.simulate? undefined
+Jun 12 11:51:13 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="fish - tmp - Visual Studio Code" resourceClass="code" resourceName="code" pid=50867 internalId="{1c71f26e-12c1-41c1-9d58-b435765a77de}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:51:16 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="Console window for Enigmatica 2: Expert - Extended — Prism Launcher 11.0.2" resourceClass="org.prismlauncher.PrismLauncher" resourceName="prismlauncher" pid=6036 internalId="{acce5479-7181-4891-84f3-735ffade0da3}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:51:18 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="fish - tmp - Visual Studio Code" resourceClass="code" resourceName="code" pid=50867 internalId="{1c71f26e-12c1-41c1-9d58-b435765a77de}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:51:19 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="/home/derek/Downloads - fish" resourceClass="tabby" resourceName="tabby" pid=10586 internalId="{0c12c455-94a6-4d0e-a786-7a71e9a7aff1}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
+Jun 12 11:51:21 Legion-Laptop kwin_wayland[3977]: vw-recon windowActivated caption="fish - tmp - Visual Studio Code" resourceClass="code" resourceName="code" pid=50867 internalId="{1c71f26e-12c1-41c1-9d58-b435765a77de}" desktop=undefined windowType=0 windowRole="" windowClass=undefined
 
   /home/derek/Downloads/tmp  claude/linux-foundations                                                                                                                                       
-❮ python /tmp/vw-recon-portal.py
-Traceback (most recent call last):
-  File "/tmp/vw-recon-portal.py", line 41, in <module>
-    req = portal.CreateSession({
-        'handle_token': GLib.Variant('s', f'create_{token_h}'),
-        'session_handle_token': GLib.Variant('s', f'sess_{token_s}'),
-    })
-  File "/usr/lib/python3.14/site-packages/pydbus/proxy_method.py", line 72, in __call__
-    ret = instance._bus.con.call_sync(
-          ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
-        instance._bus_name, instance._path,
-     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        self._iface_name, self.__name__, GLib.Variant(self._sinargs, args), GLib.VariantType.new(self._soutargs),
-     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        0, timeout_to_glib(timeout), None).unpack()
-     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-gi.repository.GLib.GError: g-io-error-quark: GDBus.Error:org.freedesktop.portal.Error.NotAllowed: Location services disabled (36)
-
+❮ 
   /home/derek/Downloads/tmp  claude/linux-foundations                                                                                                                                       
-❮ cp /tmp/vw-recon.log .
+❮ python3 /tmp/vw-recon-screencast.py
+EXCEPTION at CreateSession: g-io-error-quark: GDBus.Error:org.freedesktop.portal.Error.NotAllowed: Location services disabled (36)
