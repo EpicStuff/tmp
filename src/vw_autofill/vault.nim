@@ -21,23 +21,42 @@ proc listLogins*(b: VaultBackend): seq[Credential] =
 proc status*(b: VaultBackend): JsonNode =
   b.statusImpl()
 
+proc bwEnv(session: string): StringTableRef =
+  result = newStringTable()
+  for k, v in envPairs():
+    result[k] = v
+  result["BW_SESSION"] = session
+  result["BW_NOINTERACTION"] = "true"
+
 proc runBw(args: openArray[string], session: string): tuple[output, errOutput: string, code: int] =
   ## Run bw with BW_SESSION + BW_NOINTERACTION set. Capture stdout and
   ## stderr *separately* — bw prints non-JSON noise (deprecation
   ## warnings, network errors, login banners) to stderr; merging it
   ## into stdout corrupts the JSON parse downstream.
-  var env = newStringTable()
-  for k, v in envPairs():
-    env[k] = v
-  env["BW_SESSION"] = session
-  env["BW_NOINTERACTION"] = "true"
   let p = startProcess(
     "bw",
     args = @args,
     options = {poUsePath},
-    env = env,
+    env = bwEnv(session),
   )
   defer: p.close()
+  let output = p.outputStream.readAll()
+  let errOutput = p.errorStream.readAll()
+  let code = p.waitForExit()
+  (output, errOutput, code)
+
+proc runBwStdin(args: openArray[string], session, stdinInput: string): tuple[output, errOutput: string, code: int] =
+  ## Like runBw but pipes `stdinInput` into bw's stdin. Used for
+  ## `bw encode` and `bw edit item <id>` which take JSON on stdin.
+  let p = startProcess(
+    "bw",
+    args = @args,
+    options = {poUsePath},
+    env = bwEnv(session),
+  )
+  defer: p.close()
+  p.inputStream.write(stdinInput)
+  p.inputStream.close()
   let output = p.outputStream.readAll()
   let errOutput = p.errorStream.readAll()
   let code = p.waitForExit()
@@ -89,6 +108,33 @@ proc newBwBackend*(session: string): VaultBackend =
   result.statusImpl = proc(): JsonNode =
     let (output, errOutput, code) = runBw(["status"], sessionCopy)
     parseBwJson(output, errOutput, code, "bw status")
+
+proc bwAddUriToItem*(itemId, newUri, session: string) =
+  ## Fetch item, append `newUri` to its login.uris, push back via
+  ## bw encode | bw edit item <id>. After this returns, bw's local
+  ## cache holds the new URI and the daemon's next collectRules()
+  ## will see it.
+  let (gout, gerr, gcode) = runBw(@["get", "item", itemId], session)
+  let item = parseBwJson(gout, gerr, gcode, "bw get item " & itemId)
+  if item{"type"}.getInt != 1:
+    raise newException(VaultError, "item " & itemId & " is not a login")
+  if item{"login"}.isNil:
+    item["login"] = newJObject()
+  if item{"login", "uris"}.isNil:
+    item["login"]["uris"] = newJArray()
+  var entry = newJObject()
+  entry["match"] = newJNull()
+  entry["uri"] = newJString(newUri)
+  item["login"]["uris"].add(entry)
+
+  let (eout, eerr, ecode) = runBwStdin(@["encode"], session, $item)
+  if ecode != 0:
+    raise newException(VaultError, "bw encode failed: " & eerr & " stdout=" & eout)
+  let encoded = eout.strip()
+
+  let (uout, uerr, ucode) = runBwStdin(@["edit", "item", itemId], session, encoded)
+  if ucode != 0:
+    raise newException(VaultError, "bw edit item failed: " & uerr & " stdout=" & uout)
 
 proc collectRules*(b: VaultBackend): seq[BoundRule] =
   ## Convenience: pull items via bw and re-fetch URIs from the raw JSON.

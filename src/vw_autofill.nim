@@ -109,9 +109,18 @@ proc fzfPick(prompt: string, choices: openArray[string]): string =
   result = if idx >= 0 and idx < choices.len: choices[idx] else: ""
 
 proc cmdCapture() =
-  ## Interactive rule-creation flow. Focus the target window, then
-  ## answer a few prompts; we print a URI you can paste into a vault
-  ## item's login URIs.
+  ## Interactive rule-creation flow.
+  ##   1. countdown so user can focus the target window
+  ##   2. fetch lastWindow from daemon
+  ##   3. fzf-pick the vault item to attach the URI to
+  ##   4. prompt for sequence / matchers / mode
+  ##   5. push URI into the vault item via bw edit
+  ##   6. tell the daemon to reload — no manual restart
+  let session = getEnv("BW_SESSION")
+  if session.len == 0:
+    stderr.writeLine "BW_SESSION required"
+    quit 1
+
   let delay = 5
   echo "Focus the target window in the next ", delay, " seconds."
   for i in countdown(delay, 1):
@@ -129,6 +138,29 @@ proc cmdCapture() =
   echo "  title = ", win.title
   echo "  class = ", win.cls
   echo ""
+
+  # Pick vault item via fzf. Label is "<name>  [<short-id>]" so the
+  # user can disambiguate items with duplicate names.
+  let b = newBwBackend(session)
+  let creds = b.listLogins()
+  if creds.len == 0:
+    echo "no login items in vault"
+    quit 1
+  var labels: seq[string]
+  for c in creds:
+    let shortId = if c.itemId.len >= 8: c.itemId[0 ..< 8] else: c.itemId
+    labels.add c.itemName & "  [" & shortId & "]"
+  let pickedLabel = fzfPick("Vault item to attach URI to", labels)
+  if pickedLabel.len == 0:
+    echo "cancelled"
+    quit 1
+  var pickedId = ""
+  var pickedName = ""
+  for i, l in labels:
+    if l == pickedLabel:
+      pickedId = creds[i].itemId
+      pickedName = creds[i].itemName
+      break
 
   let seqStr     = promptDefault("Sequence", "$user$tab$pass")
   let titleMatch = promptDefault("Title substring matcher (empty = none)", "")
@@ -148,12 +180,21 @@ proc cmdCapture() =
       qparts.add "unsafe=1"
   let q = if qparts.len > 0: "?" & qparts.join("&") else: ""
   let uriStr = "linapp://" & win.exe & q
+
   echo ""
-  echo "Add this URI to a vault item's login URIs:"
-  echo "  ", uriStr
+  echo "URI:  ", uriStr
+  echo "Item: ", pickedName, " (", pickedId, ")"
   echo ""
-  echo "After saving in the vault, run `bw sync && vw_autofill reload`"
-  echo "to refresh the running daemon's rule set (no restart needed)."
+
+  bwAddUriToItem(pickedId, uriStr, session)
+  echo "saved to vault."
+
+  try:
+    let n = sendReload()
+    echo "daemon reloaded: ", n, " rule(s) total."
+  except CatchableError as e:
+    echo "saved, but daemon reload failed: ", e.msg
+    echo "(run `vw_autofill reload` manually once the daemon is up)"
 
 proc usage() =
   echo """vw-autofill — Bitwarden/Vaultwarden desktop autofill
