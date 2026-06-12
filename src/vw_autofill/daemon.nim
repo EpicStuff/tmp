@@ -39,6 +39,14 @@ const introspectionXml = """<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Obj
     <method name="Reload">
       <arg type="u" name="rule_count" direction="out"/>
     </method>
+    <method name="ListItems">
+      <arg type="as" name="ids"   direction="out"/>
+      <arg type="as" name="names" direction="out"/>
+    </method>
+    <method name="AddUriToItem">
+      <arg type="s" name="item_id" direction="in"/>
+      <arg type="s" name="uri"     direction="in"/>
+    </method>
   </interface>
   <interface name="org.freedesktop.DBus.Introspectable">
     <method name="Introspect">
@@ -60,6 +68,12 @@ type
       ## Set by the CLI command that starts the daemon. Lets Reload()
       ## re-fetch rules without us having to wire bw access into the
       ## daemon module itself.
+    listLoginsProc*: proc(): seq[Credential] {.closure.}
+      ## Lets capture clients list vault items via the daemon (which
+      ## holds the unlocked session) instead of needing their own.
+    addUriProc*: proc(itemId, uri: string) {.closure.}
+      ## Lets capture clients append a URI to a vault item via the
+      ## daemon — again so only the daemon needs vault access.
 
 proc log(d: Daemon, line: string) =
   ## Single sink for human-readable status. Stderr by default; if
@@ -166,6 +180,44 @@ proc handleReload(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
     bus.sendErrorReply(incoming, "Reload failed: " & e.msg)
   true
 
+proc handleListItems(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
+  if d.listLoginsProc == nil:
+    bus.sendErrorReply(incoming, "ListItems not supported")
+    return true
+  try:
+    let creds = d.listLoginsProc()
+    var ids: seq[string]
+    var names: seq[string]
+    for c in creds:
+      ids.add c.itemId
+      names.add c.itemName
+    bus.sendReply(incoming, @[asDbusValue(ids), asDbusValue(names)])
+  except CatchableError as e:
+    bus.sendErrorReply(incoming, "ListItems failed: " & e.msg)
+  true
+
+proc handleAddUriToItem(d: Daemon, bus: Bus, incoming: IncomingMessage): bool =
+  if d.addUriProc == nil:
+    bus.sendErrorReply(incoming, "AddUriToItem not supported")
+    return true
+  let args = incoming.unpackValueSeq()
+  if args.len < 2:
+    bus.sendErrorReply(incoming, "AddUriToItem: bad arg count " & $args.len)
+    return true
+  try:
+    let itemId = args[0].asNative(string)
+    let uri    = args[1].asNative(string)
+    d.addUriProc(itemId, uri)
+    # Re-fetch so the new URI becomes a live rule immediately.
+    if d.reloadProc != nil:
+      d.rules = d.reloadProc()
+      d.recomputeMatch()
+      d.log "added URI to " & itemId & "; now " & $d.rules.len & " rule(s)"
+    bus.sendReply(incoming, @[])
+  except CatchableError as e:
+    bus.sendErrorReply(incoming, "AddUriToItem failed: " & e.msg)
+  true
+
 proc dispatch(d: Daemon, kind: IncomingMessageType, incoming: IncomingMessage): bool =
   let iface = incoming.interfaceName
   let name  = incoming.name
@@ -185,6 +237,10 @@ proc dispatch(d: Daemon, kind: IncomingMessageType, incoming: IncomingMessage): 
       return d.handleLastWindow(d.bus, incoming)
     of "Reload":
       return d.handleReload(d.bus, incoming)
+    of "ListItems":
+      return d.handleListItems(d.bus, incoming)
+    of "AddUriToItem":
+      return d.handleAddUriToItem(d.bus, incoming)
     else:
       d.bus.sendErrorReply(incoming, "unknown method " & name)
       return true
@@ -314,6 +370,32 @@ proc sendReload*(): uint32 =
   reply.raiseIfError()
   var iter = reply.iterate()
   result = iter.unpackCurrent(uint32)
+
+proc sendListItems*(): tuple[ids, names: seq[string]] =
+  ## Ask the daemon for its current vault item list. Uses the
+  ## daemon's session token — caller doesn't need BW_SESSION.
+  let bus = getBus(DBUS_BUS_SESSION)
+  var msg = makeCall(BusName, ObjPath.ObjectPath, IfaceName, "ListItems")
+  let pending = bus.sendMessageWithReply(msg)
+  let reply = pending.waitForReply()
+  defer: reply.close()
+  reply.raiseIfError()
+  var iter = reply.iterate()
+  result.ids = iter.unpackCurrent(seq[string])
+  iter.advanceIter()
+  result.names = iter.unpackCurrent(seq[string])
+
+proc sendAddUriToItem*(itemId, uri: string) =
+  ## Ask the daemon to append `uri` to `itemId`'s login.uris. Daemon
+  ## does the bw round-trip + reloads its rule cache.
+  let bus = getBus(DBUS_BUS_SESSION)
+  var msg = makeCall(BusName, ObjPath.ObjectPath, IfaceName, "AddUriToItem")
+  msg.append(itemId)
+  msg.append(uri)
+  let pending = bus.sendMessageWithReply(msg)
+  let reply = pending.waitForReply()
+  defer: reply.close()
+  reply.raiseIfError()
 
 proc sendLastWindow*(): tuple[exe, title, cls: string] =
   ## Client side: ask the daemon what window it most recently saw

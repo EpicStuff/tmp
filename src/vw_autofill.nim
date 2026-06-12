@@ -73,6 +73,81 @@ proc readBwSession(): string =
     stderr.writeLine "BW_SESSION env is set but session is not unlocked."
   bwUnlockInteractive()
 
+proc findKwinScriptSource(): string =
+  ## Look for data/kwin-script relative to the binary (the usual repo
+  ## layout: <repo>/bin/vw_autofill + <repo>/data/kwin-script), then
+  ## next to it (in case the binary was installed alongside).
+  let exeDir = getAppFilename().parentDir
+  let repoLayout = exeDir.parentDir / "data" / "kwin-script"
+  if dirExists(repoLayout): return repoLayout
+  let installedLayout = exeDir / "kwin-script"
+  if dirExists(installedLayout): return installedLayout
+  return ""
+
+proc runCheck(cmd: string): tuple[output: string, code: int] =
+  let r = execCmdEx(cmd)
+  (r.output, r.exitCode)
+
+proc cmdInstallKwinScript() =
+  ## End-to-end KWin script installer:
+  ##   - locate data/kwin-script
+  ##   - kpackagetool6 install (or upgrade if already there)
+  ##   - kwriteconfig6: tick the script enabled in kwinrc
+  ##   - qdbus6 reload KWin's script engine
+  let src = findKwinScriptSource()
+  if src.len == 0:
+    stderr.writeLine "Could not find data/kwin-script next to the binary."
+    quit 1
+  echo "source: ", src
+
+  let (uOut, uCode) = runCheck("kpackagetool6 -t KWin/Script -u " & quoteShell(src))
+  if uCode == 0:
+    echo "upgraded existing install."
+  else:
+    let (iOut, iCode) = runCheck("kpackagetool6 -t KWin/Script -i " & quoteShell(src))
+    if iCode != 0:
+      stderr.writeLine "kpackagetool6 failed:"
+      stderr.writeLine uOut
+      stderr.writeLine iOut
+      quit 1
+    echo "installed."
+
+  let (_, eCode) = runCheck(
+    "kwriteconfig6 --file kwinrc --group Plugins " &
+    "--key vw-autofill-watcherEnabled true")
+  if eCode == 0:
+    echo "enabled in ~/.config/kwinrc."
+  else:
+    echo "(could not auto-enable; you may need to tick it in System Settings -> Window Management -> KWin Scripts)"
+
+  let (rOut, rCode) = runCheck(
+    "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start")
+  if rCode == 0:
+    echo "KWin script engine reloaded."
+  else:
+    stderr.writeLine "qdbus6 reload failed: " & rOut
+    echo "Reload manually:"
+    echo "    qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start"
+
+  echo ""
+  echo "Default Fill shortcut is Meta+Alt+V. Rebind in:"
+  echo "    System Settings -> Shortcuts (search 'vw-autofill')"
+
+proc cmdUninstallKwinScript() =
+  let (rmOut, rmCode) = runCheck(
+    "kpackagetool6 -t KWin/Script -r vw-autofill-watcher")
+  if rmCode == 0:
+    echo "removed KWin script."
+  else:
+    stderr.writeLine "kpackagetool6 -r failed: " & rmOut
+    quit 1
+  discard runCheck(
+    "kwriteconfig6 --file kwinrc --group Plugins " &
+    "--key vw-autofill-watcherEnabled false")
+  discard runCheck(
+    "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start")
+  echo "done."
+
 proc warnIfNoYdotoold(socket: string) =
   if not fileExists(socket):
     stderr.writeLine "WARNING: ydotoold socket " & socket &
@@ -89,7 +164,11 @@ proc cmdDaemon() =
   warnIfNoYdotoold(socket)
   let d = newDaemon(rules, socket, logPath)
   let backend = b
-  d.reloadProc = proc(): seq[BoundRule] = backend.collectRules()
+  let sessionCopy = session
+  d.reloadProc     = proc(): seq[BoundRule] = backend.collectRules()
+  d.listLoginsProc = proc(): seq[Credential] = backend.listLogins()
+  d.addUriProc     = proc(itemId, uri: string) =
+    bwAddUriToItem(itemId, uri, sessionCopy)
   d.serve()
 
 proc cmdReload() =
@@ -155,21 +234,32 @@ proc fzfPick(prompt: string, choices: openArray[string]): string =
   result = if idx >= 0 and idx < choices.len: choices[idx] else: ""
 
 proc cmdCapture() =
-  ## Interactive rule-creation flow.
-  ##   1. fail-fast checks: daemon reachable, vault unlocked
-  ##   2. countdown so user can focus the target window
-  ##   3. fetch lastWindow from daemon
-  ##   4. fzf-pick the vault item to attach the URI to
-  ##   5. prompt for sequence / matchers / mode
-  ##   6. push URI into the vault item via bw edit
-  ##   7. tell the daemon to reload — no manual restart
+  ## Interactive rule-creation flow. Vault access goes through the
+  ## daemon, so the caller does NOT need BW_SESSION — the daemon
+  ## already holds an unlocked session.
+  ##   1. ping daemon
+  ##   2. fetch vault items via daemon
+  ##   3. countdown for user to focus the target window
+  ##   4. fetch lastWindow from daemon
+  ##   5. fzf-pick the vault item
+  ##   6. prompt for sequence / matchers / mode
+  ##   7. ask daemon to push URI to the chosen item (and reload its cache)
   try:
     discard sendIntrospect()
   except CatchableError as e:
     stderr.writeLine "Daemon not reachable: " & e.msg
     stderr.writeLine "Start it first: ./bin/vw_autofill daemon"
     quit 1
-  let session = readBwSession()
+
+  var items: tuple[ids, names: seq[string]]
+  try:
+    items = sendListItems()
+  except CatchableError as e:
+    stderr.writeLine "ListItems failed: " & e.msg
+    quit 1
+  if items.ids.len == 0:
+    echo "no login items in vault"
+    quit 1
 
   let delay = 5
   echo "Focus the target window in the next ", delay, " seconds."
@@ -182,7 +272,7 @@ proc cmdCapture() =
   if win.exe.len == 0 and win.title.len == 0:
     echo "Daemon has not seen any window activation yet."
     echo "Is the KWin watcher script enabled and reloaded?"
-    echo "    qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start"
+    echo "    ./bin/vw_autofill install-kwin-script"
     quit 1
   echo "Captured:"
   echo "  exe   = ", win.exe
@@ -190,17 +280,11 @@ proc cmdCapture() =
   echo "  class = ", win.cls
   echo ""
 
-  # Pick vault item via fzf. Label is "<name>  [<short-id>]" so the
-  # user can disambiguate items with duplicate names.
-  let b = newBwBackend(session)
-  let creds = b.listLogins()
-  if creds.len == 0:
-    echo "no login items in vault"
-    quit 1
   var labels: seq[string]
-  for c in creds:
-    let shortId = if c.itemId.len >= 8: c.itemId[0 ..< 8] else: c.itemId
-    labels.add c.itemName & "  [" & shortId & "]"
+  for i, name in items.names:
+    let id = items.ids[i]
+    let shortId = if id.len >= 8: id[0 ..< 8] else: id
+    labels.add name & "  [" & shortId & "]"
   let pickedLabel = fzfPick("Vault item to attach URI to", labels)
   if pickedLabel.len == 0:
     echo "cancelled"
@@ -209,8 +293,8 @@ proc cmdCapture() =
   var pickedName = ""
   for i, l in labels:
     if l == pickedLabel:
-      pickedId = creds[i].itemId
-      pickedName = creds[i].itemName
+      pickedId = items.ids[i]
+      pickedName = items.names[i]
       break
 
   let seqStr     = promptDefault("Sequence", "$user$tab$pass")
@@ -226,7 +310,6 @@ proc cmdCapture() =
   qparts.add "seq=" & encodeUrl(seqStr, usePlus = false)
   if modeStr == "auto":
     qparts.add "mode=auto"
-    # auto without any matcher needs unsafe=1 to pass isSafe
     if titleMatch.len == 0 and not useClass:
       qparts.add "unsafe=1"
   let q = if qparts.len > 0: "?" & qparts.join("&") else: ""
@@ -237,15 +320,8 @@ proc cmdCapture() =
   echo "Item: ", pickedName, " (", pickedId, ")"
   echo ""
 
-  bwAddUriToItem(pickedId, uriStr, session)
-  echo "saved to vault."
-
-  try:
-    let n = sendReload()
-    echo "daemon reloaded: ", n, " rule(s) total."
-  except CatchableError as e:
-    echo "saved, but daemon reload failed: ", e.msg
-    echo "(run `vw_autofill reload` manually once the daemon is up)"
+  sendAddUriToItem(pickedId, uriStr)
+  echo "saved to vault; daemon rules refreshed."
 
 proc usage() =
   echo """vw-autofill — Bitwarden/Vaultwarden desktop autofill
@@ -256,10 +332,12 @@ Usage:
 Commands:
     list                  list every rule URI in your unlocked vault
     status                print bw vault status JSON
-    daemon                run the session-bus daemon (needs BW_SESSION)
+    daemon                run the session-bus daemon (auto-unlocks vault if needed)
     fill                  tell a running daemon to fire its cached match
     reload                tell a running daemon to re-fetch rules from bw
     capture               interactive rule builder for the focused window
+    install-kwin-script   install + enable the KWin watcher script
+    uninstall-kwin-script remove the KWin watcher script
     introspect            fetch the daemon's introspection XML
     simulate EXE TITLE [CLASS] [PID]
                           synthesize a WindowActivated D-Bus call
@@ -282,6 +360,8 @@ when isMainModule:
   of "fill":       cmdFill()
   of "reload":     cmdReload()
   of "capture":    cmdCapture()
+  of "install-kwin-script":   cmdInstallKwinScript()
+  of "uninstall-kwin-script": cmdUninstallKwinScript()
   of "introspect": cmdIntrospect()
   of "simulate":   cmdSimulate()
   of "help", "--help", "-h": usage()
