@@ -146,9 +146,37 @@ proc newDaemon*(rules: seq[BoundRule], socket = DefaultYdotoolSocket,
   if logPath.len > 0:
     result.logf = open(logPath, fmAppend)
 
+const
+  DBUS_NAME_FLAG_ALLOW_REPLACEMENT = 0x1.cuint
+  DBUS_NAME_FLAG_REPLACE_EXISTING  = 0x2.cuint
+  DBUS_NAME_FLAG_DO_NOT_QUEUE      = 0x4.cuint
+  REQUEST_NAME_REPLY_PRIMARY_OWNER = 1
+  REQUEST_NAME_REPLY_ALREADY_OWNER = 4
+
+proc claimNameOrDie(d: Daemon, name: string) =
+  ## nim-dbus's requestName calls libdbus with flags=0 and doesn't
+  ## verify ownership. If a stale daemon (or anyone) already owns the
+  ## name, the new process silently isn't the owner, and the bus
+  ## routes calls to whoever the bus still considers the owner. Force
+  ## replacement and abort if we can't become primary.
+  var err: DBusError
+  dbus_error_init(addr err)
+  let flags = DBUS_NAME_FLAG_REPLACE_EXISTING or
+              DBUS_NAME_FLAG_ALLOW_REPLACEMENT or
+              DBUS_NAME_FLAG_DO_NOT_QUEUE
+  let ret = dbus_bus_request_name(d.bus.conn, name, flags, addr err)
+  if ret < 0:
+    defer: dbus_error_free(addr err)
+    raise newException(DbusException, $err.message)
+  if ret != REQUEST_NAME_REPLY_PRIMARY_OWNER and
+     ret != REQUEST_NAME_REPLY_ALREADY_OWNER:
+    raise newException(DbusException,
+      "could not claim " & name & " (reply=" & $ret & ")")
+  d.log "claimed bus name " & name & " (reply=" & $ret & ")"
+
 proc serve*(d: Daemon) =
   d.bus = getBus(DBUS_BUS_SESSION)
-  d.bus.requestName(BusName)
+  d.claimNameOrDie(BusName)
   d.bus.registerObject(ObjPath.ObjectPath, makeCallback(d))
   d.log "vw-autofill daemon listening on " & BusName & " path " & ObjPath
   d.log "loaded " & $d.rules.len & " rule(s)"
@@ -159,6 +187,34 @@ proc sendFill*() =
   ## Client side: tell a running daemon to fire its cached match.
   let bus = getBus(DBUS_BUS_SESSION)
   var msg = makeCall(BusName, ObjPath.ObjectPath, IfaceName, "Fill")
+  let pending = bus.sendMessageWithReply(msg)
+  let reply = pending.waitForReply()
+  defer: reply.close()
+  reply.raiseIfError()
+
+proc sendIntrospect*(): string =
+  ## Client side: ask the daemon for its introspection XML through the
+  ## same lib our daemon listens on. If this works while `busctl
+  ## introspect` times out, the issue is busctl-side, not ours.
+  let bus = getBus(DBUS_BUS_SESSION)
+  var msg = makeCall(BusName, ObjPath.ObjectPath,
+                     "org.freedesktop.DBus.Introspectable", "Introspect")
+  let pending = bus.sendMessageWithReply(msg)
+  let reply = pending.waitForReply()
+  defer: reply.close()
+  reply.raiseIfError()
+  var iter = reply.iterate()
+  result = iter.unpackCurrent(string)
+
+proc sendWindowActivated*(exe, title, cls: string, pid: uint32) =
+  ## Client side: synthesize a WindowActivated call. Useful for
+  ## testing the matcher path without KWin.
+  let bus = getBus(DBUS_BUS_SESSION)
+  var msg = makeCall(BusName, ObjPath.ObjectPath, IfaceName, "WindowActivated")
+  msg.append(exe)
+  msg.append(title)
+  msg.append(cls)
+  msg.append(pid)
   let pending = bus.sendMessageWithReply(msg)
   let reply = pending.waitForReply()
   defer: reply.close()
