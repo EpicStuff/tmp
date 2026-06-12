@@ -107,6 +107,7 @@ proc makeCallback(d: Daemon): MessageCallback =
   result = proc(kind: IncomingMessageType, incoming: IncomingMessage): bool =
     let iface = incoming.interfaceName
     let name  = incoming.name
+    d.log "recv kind=" & $kind & " iface='" & iface & "' name='" & name & "'"
     if iface == IfaceName:
       case name
       of "WindowActivated":
@@ -121,10 +122,23 @@ proc makeCallback(d: Daemon): MessageCallback =
       else:
         d.bus.sendErrorReply(incoming, "unknown method " & name)
         return true
-    elif iface == IntroIface and name == "Introspect":
+    # Introspect can arrive with iface = "" (some clients omit it).
+    elif name == "Introspect" and (iface == IntroIface or iface.len == 0):
       return d.handleIntrospect(d.bus, incoming)
-    else:
-      return false  ## let other handlers (e.g. peer ping) deal with it
+    # Standard Peer interface so busctl status / ping works.
+    elif iface == "org.freedesktop.DBus.Peer":
+      case name
+      of "Ping":
+        d.bus.sendReply(incoming, @[])
+        return true
+      of "GetMachineId":
+        d.bus.sendReply(incoming, @[asDbusValue("00000000000000000000000000000000")])
+        return true
+      else: discard
+    d.log "  -> no handler matched, replying error"
+    d.bus.sendErrorReply(incoming,
+      "no handler for " & iface & "." & name)
+    return true
 
 proc newDaemon*(rules: seq[BoundRule], socket = DefaultYdotoolSocket,
                 logPath = ""): Daemon =
