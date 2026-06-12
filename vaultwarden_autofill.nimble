@@ -8,6 +8,7 @@ binDir        = "bin"
 bin           = @["vw_autofill"]
 
 requires "nim >= 2.0.0"
+requires "dbus"
 
 task test, "Run tests":
   exec "nim r -d:release tests/test_uri.nim"
