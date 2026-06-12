@@ -83,15 +83,17 @@ EOF
 mkdir -p ~/.local/share/kwin/scripts/vw-recon/contents/code
 cat > ~/.local/share/kwin/scripts/vw-recon/metadata.json <<'JSON'
 {
-  "KPlugin": {
-    "Id": "vw-recon",
-    "Name": "vw-autofill recon",
-    "Description": "Logs focused-window properties for recon. Disable when done.",
-    "Version": "1",
-    "Authors": [{"Name": "vw-autofill"}],
-    "License": "MIT",
-    "ServiceTypes": ["KWin/Script"]
-  }
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Id": "vw-recon",
+        "Name": "vw-autofill recon",
+        "Description": "Logs focused-window properties for recon. Disable when done.",
+        "Version": "1.0",
+        "License": "MIT",
+        "Authors": [{"Name": "vw-autofill"}]
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
 }
 JSON
 

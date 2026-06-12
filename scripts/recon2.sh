@@ -126,15 +126,17 @@ hdr 'KWin script Workspace introspection (does KWin offer input emulation direct
 mkdir -p ~/.local/share/kwin/scripts/vw-recon2/contents/code
 cat > ~/.local/share/kwin/scripts/vw-recon2/metadata.json <<'JSON'
 {
-  "KPlugin": {
-    "Id": "vw-recon2",
-    "Name": "vw-autofill recon2",
-    "Description": "Introspects KWin workspace API surface. Disable when done.",
-    "Version": "1",
-    "Authors": [{"Name": "vw-autofill"}],
-    "License": "MIT",
-    "ServiceTypes": ["KWin/Script"]
-  }
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Id": "vw-recon2",
+        "Name": "vw-autofill recon2",
+        "Description": "Introspects KWin workspace API surface. Disable when done.",
+        "Version": "1.0",
+        "License": "MIT",
+        "Authors": [{"Name": "vw-autofill"}]
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
 }
 JSON
 cat > ~/.local/share/kwin/scripts/vw-recon2/contents/code/main.js <<'JS'
