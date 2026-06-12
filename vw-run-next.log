@@ -1,0 +1,15 @@
+=== part 1: portal denial log capture (no elevation needed) ===
+$ python3 /tmp/vw-recon-screencast.py
+EXCEPTION at CreateSession: g-io-error-quark: GDBus.Error:org.freedesktop.portal.Error.NotAllowed: Location services disabled (36)
+
+--- portal-kde journal during the probe ---
+
+ydotool already installed.
+$ which ydotool ydotoold
+/usr/bin/ydotool
+/usr/bin/ydotoold
+$ pgrep -af ydotoold
+66508 sudo ydotoold --socket-path=/tmp/.ydotool_socket --socket-perm=0666
+66510 sudo ydotoold --socket-path=/tmp/.ydotool_socket --socket-perm=0666
+66511 ydotoold --socket-path=/tmp/.ydotool_socket --socket-perm=0666
+user answer: n
