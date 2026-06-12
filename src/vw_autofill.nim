@@ -117,26 +117,29 @@ proc runCheck(cmd: string): tuple[output: string, code: int] =
 proc cmdInstallKwinScript() =
   ## End-to-end KWin script installer:
   ##   - locate data/kwin-script
-  ##   - kpackagetool6 install (or upgrade if already there)
+  ##   - kpackagetool6 remove (ignore failure) + install fresh.
+  ##     The upgrade-in-place path can leave Plasma running cached
+  ##     bytecode of the old script; remove + install forces a clean
+  ##     pickup.
   ##   - kwriteconfig6: tick the script enabled in kwinrc
-  ##   - qdbus6 reload KWin's script engine
+  ##   - qdbus6 Scripting.stop + Scripting.start to flush + restart
+  ##     all scripts (single .start doesn't always re-run our script).
   let src = findKwinScriptSource()
   if src.len == 0:
     stderr.writeLine "Could not find data/kwin-script next to the binary."
     quit 1
   echo "source: ", src
 
-  let (uOut, uCode) = runCheck("kpackagetool6 -t KWin/Script -u " & quoteShell(src))
-  if uCode == 0:
-    echo "upgraded existing install."
-  else:
-    let (iOut, iCode) = runCheck("kpackagetool6 -t KWin/Script -i " & quoteShell(src))
-    if iCode != 0:
-      stderr.writeLine "kpackagetool6 failed:"
-      stderr.writeLine uOut
-      stderr.writeLine iOut
-      quit 1
-    echo "installed."
+  # Aggressive remove+install instead of -u (upgrade) so Plasma can't
+  # reuse a cached compile of the previous script body.
+  discard runCheck("kpackagetool6 -t KWin/Script -r vw-autofill-watcher")
+  let (iOut, iCode) = runCheck(
+    "kpackagetool6 -t KWin/Script -i " & quoteShell(src))
+  if iCode != 0:
+    stderr.writeLine "kpackagetool6 install failed:"
+    stderr.writeLine iOut
+    quit 1
+  echo "installed."
 
   let (_, eCode) = runCheck(
     "kwriteconfig6 --file kwinrc --group Plugins " &
@@ -144,20 +147,23 @@ proc cmdInstallKwinScript() =
   if eCode == 0:
     echo "enabled in ~/.config/kwinrc."
   else:
-    echo "(could not auto-enable; you may need to tick it in System Settings -> Window Management -> KWin Scripts)"
+    echo "(could not auto-enable; tick it in System Settings -> Window Management -> KWin Scripts)"
 
+  discard runCheck("qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.stop")
   let (rOut, rCode) = runCheck(
     "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start")
   if rCode == 0:
-    echo "KWin script engine reloaded."
+    echo "KWin script engine stopped + started."
   else:
     stderr.writeLine "qdbus6 reload failed: " & rOut
-    echo "Reload manually:"
-    echo "    qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start"
 
   echo ""
   echo "Default Fill shortcut is Meta+Alt+V. Rebind in:"
   echo "    System Settings -> Shortcuts (search 'vw-autofill')"
+  echo ""
+  echo "Diagnostic: the script reports its load/registerShortcut state"
+  echo "via the daemon log. Tail it:"
+  echo "    tail -f /tmp/vw-autofill-daemon.log | grep kwin-script"
 
 proc cmdUninstallKwinScript() =
   let (rmOut, rmCode) = runCheck(

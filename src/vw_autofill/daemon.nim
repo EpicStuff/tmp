@@ -53,6 +53,9 @@ const introspectionXml = """<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Obj
     <method name="Status">
       <arg type="s" name="json" direction="out"/>
     </method>
+    <method name="Log">
+      <arg type="s" name="message" direction="in"/>
+    </method>
   </interface>
   <interface name="org.freedesktop.DBus.Introspectable">
     <method name="Introspect">
@@ -300,6 +303,12 @@ proc dispatch(d: Daemon, kind: IncomingMessageType, incoming: IncomingMessage): 
       return d.handleListRules(d.bus, incoming)
     of "Status":
       return d.handleStatus(d.bus, incoming)
+    of "Log":
+      let args = incoming.unpackValueSeq()
+      if args.len >= 1:
+        d.log "[kwin-script] " & args[0].asNative(string)
+      d.bus.sendReply(incoming, @[])
+      return true
     else:
       d.bus.sendErrorReply(incoming, "unknown method " & name)
       return true

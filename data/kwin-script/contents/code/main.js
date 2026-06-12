@@ -2,12 +2,20 @@
 //
 // Hooks workspace.windowActivated and pushes (exe, title, class, pid)
 // into the org.vwautofill.Daemon process over the session D-Bus bus.
+// Also registers a global keybind that fires Fill() on the daemon.
 //
-// KWin's callDBus signature:
-//   callDBus(service, path, iface, method, ...args)
-// We pass strings for exe/title/class. KWin doesn't expose the process
-// exe path on Wayland, so we send the resourceName (== exe basename for
-// most apps) as the exe slot; the daemon will compare against it.
+// Plasma 6 doesn't reliably route script print() to the user journal,
+// so diagnostic messages go through the daemon's Log() method instead.
+// Anything we want to know shows up in the daemon log under a
+// "[kwin-script]" prefix.
+
+var BUS_SERVICE = "org.vwautofill.Daemon";
+var BUS_PATH    = "/org/vwautofill/Daemon";
+var BUS_IFACE   = "org.vwautofill.Daemon1";
+
+function daemonLog(msg) {
+    callDBus(BUS_SERVICE, BUS_PATH, BUS_IFACE, "Log", msg);
+}
 
 function pushActivation(window) {
     if (!window) return;
@@ -15,46 +23,24 @@ function pushActivation(window) {
     var title = (window.caption       || "").toString();
     var cls   = (window.resourceClass || "").toString();
     var pid   = (window.pid           || 0)  >>> 0;
-    callDBus(
-        "org.vwautofill.Daemon",
-        "/org/vwautofill/Daemon",
-        "org.vwautofill.Daemon1",
-        "WindowActivated",
-        exe, title, cls, pid
-    );
+    callDBus(BUS_SERVICE, BUS_PATH, BUS_IFACE,
+             "WindowActivated", exe, title, cls, pid);
 }
 
 workspace.windowActivated.connect(pushActivation);
+daemonLog("script v3 loaded; attempting registerShortcut(Meta+Alt+V)");
 
-// Register a global hotkey that fires Fill on the daemon. By going
-// through registerShortcut, we get:
-//   - a System Settings entry (Shortcuts -> KWin -> "vw-autofill: fill")
-//     so the user can rebind it without editing config
-//   - no khotkeys/kglobalaccel external wiring; the shortcut lives
-//     with the script that already needs to be enabled anyway
-// Default keybind is Meta+Alt+V; user can change it freely.
-//
-// print() lines below land in the user's journal under the
-// kwin_wayland identifier; grep for "vw-autofill" to verify the
-// registration outcome:
-//   journalctl --user --since "5 minutes ago" | grep vw-autofill
-print("vw-autofill: script loaded; attempting registerShortcut");
 try {
     var ok = registerShortcut(
         "vw-autofill-fill",
         "vw-autofill: fill credentials into focused window",
         "Meta+Alt+V",
         function() {
-            print("vw-autofill: Fill shortcut fired");
-            callDBus(
-                "org.vwautofill.Daemon",
-                "/org/vwautofill/Daemon",
-                "org.vwautofill.Daemon1",
-                "Fill"
-            );
+            daemonLog("shortcut Meta+Alt+V fired");
+            callDBus(BUS_SERVICE, BUS_PATH, BUS_IFACE, "Fill");
         }
     );
-    print("vw-autofill: registerShortcut returned " + ok);
+    daemonLog("registerShortcut returned: " + ok);
 } catch (e) {
-    print("vw-autofill: registerShortcut THREW " + e);
+    daemonLog("registerShortcut threw: " + e);
 }
