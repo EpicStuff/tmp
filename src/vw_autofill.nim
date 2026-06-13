@@ -168,73 +168,178 @@ proc runCheck(cmd: string): tuple[output: string, code: int] =
   let r = execCmdEx(cmd)
   (r.output, r.exitCode)
 
+proc step(ok: bool, msg: string) =
+  let mark = if ok: "[ok]  " else: "[fail]"
+  echo mark & " " & msg
+
+proc findKdeTool(names: openArray[string]): string =
+  ## Different distros ship different binary names for the Qt6 helpers
+  ## (qdbus6 / qdbus-qt6 / qdbus, kpackagetool6 / kf6-kpackagetool, ...).
+  ## Pick the first that's on PATH.
+  for n in names:
+    if findExe(n).len > 0: return n
+  return ""
+
+proc kwinDbusCall(qdbus, busctl, service, path, iface, meth: string,
+                  args: openArray[string] = []): tuple[output: string, code: int] =
+  ## Prefer qdbus (matches everything we read in docs / blog posts).
+  ## Fall back to busctl when qdbus6/qdbus-qt6/qdbus isn't installed --
+  ## busctl is part of systemd and present basically everywhere.
+  if qdbus.len > 0:
+    var cmd = qdbus & " " & service & " " & path & " " & iface & "." & meth
+    for a in args: cmd.add(" " & quoteShell(a))
+    return runCheck(cmd)
+  if busctl.len > 0:
+    var cmd = busctl & " --user call " & service & " " & path & " " &
+              iface & " " & meth
+    for a in args: cmd.add(" " & quoteShell(a))
+    return runCheck(cmd)
+  return ("(no qdbus or busctl available)", 127)
+
+proc installedScriptPath(): string =
+  getHomeDir() / ".local/share/kwin/scripts/vw-autofill-watcher/contents/code/main.js"
+
 proc cmdInstallKwinScript() =
-  ## End-to-end KWin script installer:
-  ##   - locate data/kwin-script
-  ##   - kpackagetool6 remove (ignore failure) + install fresh.
-  ##     The upgrade-in-place path can leave Plasma running cached
-  ##     bytecode of the old script; remove + install forces a clean
-  ##     pickup.
-  ##   - kwriteconfig6: tick the script enabled in kwinrc
-  ##   - qdbus6 Scripting.stop + Scripting.start to flush + restart
-  ##     all scripts (single .start doesn't always re-run our script).
+  ## End-to-end KWin script installer + verifier.
+  ##
+  ## Each step prints [ok]/[fail]. After the reload, polls the daemon
+  ## log for "[kwin-script]" entries -- which is the only reliable proof
+  ## that KWin actually started running the new script. (Plasma 6 caches
+  ## script bytecode aggressively; the file can be on disk and the
+  ## plugin "enabled" without the new code ever loading.)
   let src = findKwinScriptSource()
   if src.len == 0:
-    stderr.writeLine "Could not find data/kwin-script next to the binary."
+    stderr.writeLine "[fail] could not find data/kwin-script next to the binary"
     quit 1
-  echo "source: ", src
+  echo "source:    ", src
+  let logPath = getEnv("VW_AUTOFILL_LOG", "/tmp/vw-autofill-daemon.log")
+  echo "log:       ", logPath
 
-  # Aggressive remove+install instead of -u (upgrade) so Plasma can't
-  # reuse a cached compile of the previous script body.
-  discard runCheck("kpackagetool6 -t KWin/Script -r vw-autofill-watcher")
+  # Locate KDE helpers; report missing ones up front so the user knows
+  # what to install if a step fails.
+  let kpackage    = findKdeTool(["kpackagetool6", "kf6-kpackagetool", "kpackagetool"])
+  let kwriteconf  = findKdeTool(["kwriteconfig6", "kf6-kwriteconfig", "kwriteconfig5"])
+  let qdbus       = findKdeTool(["qdbus6", "qdbus-qt6", "qdbus"])
+  let busctl      = findExe("busctl")
+  step(kpackage.len > 0,   "kpackagetool: " & (if kpackage.len > 0: kpackage else: "MISSING (install plasma-workspace)"))
+  step(kwriteconf.len > 0, "kwriteconfig: " & (if kwriteconf.len > 0: kwriteconf else: "MISSING (install kconfig)"))
+  step(qdbus.len > 0 or busctl.len > 0,
+       "dbus client:  " & (if qdbus.len > 0: qdbus elif busctl.len > 0: busctl & " (qdbus6 not found)" else: "MISSING"))
+  if kpackage.len == 0 or kwriteconf.len == 0 or (qdbus.len == 0 and busctl.len == 0):
+    quit 1
+
+  # If the daemon isn't on the bus, the [kwin-script] log entries won't
+  # be captured -- still install, but warn so the diagnostic at the end
+  # is interpreted correctly.
+  let (busOut, _) = runCheck(busctl & " --user list 2>/dev/null")
+  let daemonUp = "org.vwautofill.Daemon" in busOut
+  step(daemonUp, "daemon on bus: " &
+       (if daemonUp: "yes" else: "NO (script load diagnostic won't appear in log)"))
+
+  # 1. Remove any prior install so Plasma can't reuse cached bytecode.
+  let (_, _) = runCheck(kpackage & " -t KWin/Script -r vw-autofill-watcher")
+
+  # 2. Fresh install.
   let (iOut, iCode) = runCheck(
-    "kpackagetool6 -t KWin/Script -i " & quoteShell(src))
-  if iCode != 0:
-    stderr.writeLine "kpackagetool6 install failed:"
-    stderr.writeLine iOut
-    quit 1
-  echo "installed."
+    kpackage & " -t KWin/Script -i " & quoteShell(src))
+  step(iCode == 0, "kpackagetool install" &
+       (if iCode != 0: " -- " & iOut.strip else: ""))
+  if iCode != 0: quit 1
 
-  # In Plasma 6, Scripting.start alone won't reload code of an
-  # already-enabled script. The reliable reload pattern is:
-  #   disable in kwinrc -> Scripting.start (Plasma unloads)
-  #   enable  in kwinrc -> Scripting.start (Plasma reloads with new code)
-  echo "reloading script (disable -> start -> enable -> start)..."
-  discard runCheck("kwriteconfig6 --file kwinrc --group Plugins " &
-                   "--key vw-autofill-watcherEnabled false")
-  discard runCheck("qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start")
-  sleep(500)
-  discard runCheck("kwriteconfig6 --file kwinrc --group Plugins " &
-                   "--key vw-autofill-watcherEnabled true")
-  let (rOut, rCode) = runCheck(
-    "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start")
-  if rCode == 0:
-    echo "script reloaded."
+  # 3. Verify the file actually landed.
+  let dst = installedScriptPath()
+  let fileLanded = fileExists(dst)
+  step(fileLanded, "installed file: " & dst)
+  if not fileLanded: quit 1
+
+  # 4. Sanity: installed file matches source (catches stale-package weirdness).
+  let srcMain = src / "contents" / "code" / "main.js"
+  if fileExists(srcMain) and fileLanded:
+    let same = readFile(srcMain) == readFile(dst)
+    step(same, "installed file matches source")
+
+  # 5. Enable in kwinrc.
+  let (eOut, eCode) = runCheck(kwriteconf & " --file kwinrc --group Plugins " &
+                               "--key vw-autofill-watcherEnabled true")
+  step(eCode == 0, "kwinrc Plugins/vw-autofill-watcherEnabled = true" &
+       (if eCode != 0: " -- " & eOut.strip else: ""))
+
+  # 6. Tell KWin to re-read config (picks up the enable). On Plasma 6
+  # this is the canonical way to load/unload scripts; Scripting.start
+  # alone won't pick up a freshly-enabled script reliably.
+  let (rcOut, rcCode) = kwinDbusCall(
+    qdbus, busctl, "org.kde.KWin", "/KWin", "org.kde.KWin", "reconfigure")
+  step(rcCode == 0, "KWin reconfigure" &
+       (if rcCode != 0: " -- " & rcOut.strip else: ""))
+
+  # 7. Belt-and-braces: also poke Scripting.start in case reconfigure
+  # didn't trigger a script-engine restart on this KWin version.
+  let (sOut, sCode) = kwinDbusCall(
+    qdbus, busctl, "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", "start")
+  step(sCode == 0, "Scripting.start" &
+       (if sCode != 0: " -- " & sOut.strip else: ""))
+
+  # 8. Diagnostic: wait up to 3s for "[kwin-script]" to show up in the
+  # daemon log. If it doesn't, the script almost certainly didn't load.
+  echo ""
+  echo "waiting up to 3s for the script to phone home..."
+  let logSizeBefore = if fileExists(logPath): getFileSize(logPath) else: 0
+  var scriptPhonedHome = false
+  for i in 0 .. 15:
+    sleep(200)
+    if fileExists(logPath):
+      let f = open(logPath, fmRead)
+      defer: f.close()
+      f.setFilePos(logSizeBefore)
+      let tail = f.readAll()
+      if "[kwin-script]" in tail:
+        scriptPhonedHome = true
+        echo ""
+        echo "--- new [kwin-script] entries: ---"
+        for line in tail.splitLines:
+          if "[kwin-script]" in line: echo line
+        break
+
+  echo ""
+  if scriptPhonedHome:
+    step(true, "script loaded and called daemon.Log()")
+    echo ""
+    echo "Default Fill shortcut: Meta+Alt+V."
+    echo "Rebind in System Settings -> Shortcuts (search 'vw-autofill')."
   else:
-    stderr.writeLine "qdbus6 reload failed: " & rOut
-
-  echo ""
-  echo "Default Fill shortcut is Meta+Alt+V. Rebind in:"
-  echo "    System Settings -> Shortcuts (search 'vw-autofill')"
-  echo ""
-  echo "Diagnostic: the script's load/registerShortcut state goes to"
-  echo "the daemon log under [kwin-script]. Tail it:"
-  echo "    tail -f /tmp/vw-autofill-daemon.log | grep kwin-script"
+    step(false, "no [kwin-script] entries in " & logPath & " after 3s")
+    echo ""
+    echo "The package is on disk and enabled but KWin doesn't seem to have"
+    echo "loaded it. Things to try:"
+    echo "  1. Make sure the daemon is running first, then re-run this command."
+    echo "     (without the daemon, Log() calls go nowhere -- the script may"
+    echo "      have loaded just fine, we just couldn't observe it.)"
+    echo "  2. Log out of your Plasma session and back in. KWin re-reads"
+    echo "     scripts on session start; mid-session reload is flaky."
+    echo "  3. If you're on X11 instead of Wayland: kwin_x11 --replace &"
+    echo "     (Wayland equivalent requires logging out.)"
 
 proc cmdUninstallKwinScript() =
-  let (rmOut, rmCode) = runCheck(
-    "kpackagetool6 -t KWin/Script -r vw-autofill-watcher")
-  if rmCode == 0:
-    echo "removed KWin script."
-  else:
-    stderr.writeLine "kpackagetool6 -r failed: " & rmOut
+  let kpackage   = findKdeTool(["kpackagetool6", "kf6-kpackagetool", "kpackagetool"])
+  let kwriteconf = findKdeTool(["kwriteconfig6", "kf6-kwriteconfig", "kwriteconfig5"])
+  let qdbus      = findKdeTool(["qdbus6", "qdbus-qt6", "qdbus"])
+  let busctl     = findExe("busctl")
+  if kpackage.len == 0:
+    stderr.writeLine "[fail] kpackagetool6 not found"
     quit 1
-  discard runCheck(
-    "kwriteconfig6 --file kwinrc --group Plugins " &
-    "--key vw-autofill-watcherEnabled false")
-  discard runCheck(
-    "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start")
-  echo "done."
+
+  let (rmOut, rmCode) = runCheck(kpackage & " -t KWin/Script -r vw-autofill-watcher")
+  step(rmCode == 0, "kpackagetool remove" &
+       (if rmCode != 0: " -- " & rmOut.strip else: ""))
+
+  if kwriteconf.len > 0:
+    discard runCheck(kwriteconf & " --file kwinrc --group Plugins " &
+                     "--key vw-autofill-watcherEnabled false")
+    step(true, "kwinrc Plugins/vw-autofill-watcherEnabled = false")
+
+  discard kwinDbusCall(qdbus, busctl, "org.kde.KWin", "/KWin",
+                       "org.kde.KWin", "reconfigure")
+  step(true, "KWin reconfigure")
 
 proc warnIfNoYdotoold(socket: string) =
   if not fileExists(socket):
