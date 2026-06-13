@@ -20,7 +20,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DLOG=/tmp/vw-autofill-daemon.log
 
 echo "=== build ==="
-( cd "$ROOT" && nimble --legacy build 2>&1 ) | tail -5
+( cd "$ROOT" && nimble build 2>&1 ) | tail -5
 if [ ! -x "$ROOT/bin/vw_autofill" ]; then
     echo "build FAILED"
     exit 1
