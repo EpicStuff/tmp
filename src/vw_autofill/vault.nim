@@ -12,6 +12,7 @@ type
   VaultError* = object of CatchableError
 
   VaultBackend* = ref object
+    session*: string
     listLoginsImpl*: proc(): seq[Credential] {.closure.}
     statusImpl*: proc(): JsonNode {.closure.}
 
@@ -94,7 +95,7 @@ proc newBwBackend*(session: string): VaultBackend =
   if session.len == 0:
     raise newException(VaultError, "BW_SESSION is empty")
 
-  result = VaultBackend()
+  result = VaultBackend(session: session)
   let sessionCopy = session
 
   result.listLoginsImpl = proc(): seq[Credential] =
@@ -141,12 +142,17 @@ proc collectRules*(b: VaultBackend): seq[BoundRule] =
   ## (We re-shell because the credential carrier above doesn't yet
   ## hold URIs; that's a deliberate split — URIs are rule data,
   ## credentials are secret data.)
+  ##
+  ## Uses `b.session` (the token the backend was constructed with), not
+  ## getEnv("BW_SESSION"). The daemon now passes session tokens around
+  ## explicitly (cached file, fresh unlock) and never re-exports them
+  ## into its own env, so re-reading env here was always empty —
+  ## producing a "Vault is locked" from bw with no session.
   let s = b.statusImpl()
   if s{"status"}.getStr != "unlocked":
     raise newException(VaultError, "vault is " & s{"status"}.getStr)
 
-  let session = getEnv("BW_SESSION")
-  let (output, errOutput, code) = runBw(["list", "items"], session)
+  let (output, errOutput, code) = runBw(["list", "items"], b.session)
   let root = parseBwJson(output, errOutput, code, "bw list items")
   for item in root:
     if item{"type"}.getInt != 1:
