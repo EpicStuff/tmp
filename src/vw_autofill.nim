@@ -190,12 +190,38 @@ proc warnIfNoYdotoold(socket: string) =
       " --socket-perm=0666"
 
 proc cmdDaemon() =
-  let session = readBwSession()
-  let b = newBwBackend(session)
-  let rules = b.collectRules()
+  ## Resolve a working session by *trying* each candidate (env, cached,
+  ## fresh unlock) against the real vault. The previous "trust the
+  ## cached token blindly" path crashed startup with VaultError when
+  ## the cache was stale (after a relock or password change).
+  var session = ""
+  var rules: seq[BoundRule]
+
+  proc trySession(s, label: string): bool =
+    if s.len == 0: return false
+    try:
+      let b = newBwBackend(s)
+      rules = b.collectRules()
+      session = s
+      stderr.writeLine "vault: using " & label
+      return true
+    except CatchableError as e:
+      stderr.writeLine "vault: " & label & " is stale (" & e.msg & ")"
+      return false
+
+  if not trySession(getEnv("BW_SESSION"), "BW_SESSION env"):
+    if not trySession(readPersistedSession(),
+                      "cached session from " & persistedSessionPath()):
+      let token = bwUnlockInteractive()
+      writePersistedSession(token)
+      if not trySession(token, "fresh unlock"):
+        stderr.writeLine "could not load vault even after fresh unlock"
+        quit 1
+
   let socket = getEnv("YDOTOOL_SOCKET", DefaultYdotoolSocket)
   let logPath = getEnv("VW_AUTOFILL_LOG", "/tmp/vw-autofill-daemon.log")
   warnIfNoYdotoold(socket)
+  let b = newBwBackend(session)
   let d = newDaemon(rules, socket, logPath)
   let backend = b
   let sessionCopy = session
