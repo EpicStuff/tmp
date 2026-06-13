@@ -9,8 +9,17 @@
 ##
 ## More to come (capture, unlock helper).
 
-import std/[os, json, strutils, uri, osproc, streams]
+import std/[os, json, strutils, uri, osproc, streams, posix]
 import vw_autofill/[vault, rule, daemon, linux_consts]
+
+proc isForeground(): bool =
+  ## True iff stdin's terminal foreground process group is us. False
+  ## when we're a backgrounded job (`./bin/vw_autofill daemon &`),
+  ## meaning any attempt to read from /dev/tty for a password prompt
+  ## would get SIGTTIN'd and hang forever.
+  let fg = tcgetpgrp(0.cint)
+  if fg == -1: return false  ## no controlling terminal at all
+  return fg == getpgrp()
 
 proc requireDaemon() =
   try:
@@ -212,6 +221,11 @@ proc cmdDaemon() =
   if not trySession(getEnv("BW_SESSION"), "BW_SESSION env"):
     if not trySession(readPersistedSession(),
                       "cached session from " & persistedSessionPath()):
+      if not isForeground():
+        stderr.writeLine "Daemon is backgrounded; can't prompt for master password."
+        stderr.writeLine "Run `./bin/vw_autofill unlock` in a foreground shell first,"
+        stderr.writeLine "then re-launch the daemon."
+        quit 1
       let token = bwUnlockInteractive()
       writePersistedSession(token)
       if not trySession(token, "fresh unlock"):
@@ -238,6 +252,17 @@ proc cmdReload() =
 
 proc cmdFill() =
   sendFill()
+
+proc cmdUnlock() =
+  ## Explicit interactive unlock. Useful when you want to background
+  ## the daemon afterward (a backgrounded daemon can't prompt for the
+  ## master password itself -- see isForeground in cmdDaemon).
+  if not isForeground():
+    stderr.writeLine "unlock needs a foreground shell (it prompts for the master password)"
+    quit 1
+  let token = bwUnlockInteractive()
+  writePersistedSession(token)
+  echo "session persisted to ", persistedSessionPath()
 
 proc cmdIntrospect() =
   ## Talk to the running daemon via the same nim-dbus library it serves
@@ -393,7 +418,8 @@ Usage:
 Commands:
     list                  list every rule URI in your unlocked vault
     status                print bw vault status JSON
-    daemon                run the session-bus daemon (auto-unlocks vault if needed)
+    daemon                run the session-bus daemon (auto-unlocks if foreground)
+    unlock                explicit interactive unlock + persist session
     fill                  tell a running daemon to fire its cached match
     reload                tell a running daemon to re-fetch rules from bw
     capture               interactive rule builder for the focused window
@@ -419,6 +445,7 @@ when isMainModule:
   of "status":     cmdStatus()
   of "daemon":     cmdDaemon()
   of "fill":       cmdFill()
+  of "unlock":     cmdUnlock()
   of "reload":     cmdReload()
   of "capture":    cmdCapture()
   of "install-kwin-script":   cmdInstallKwinScript()
