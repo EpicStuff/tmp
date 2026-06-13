@@ -9,7 +9,7 @@
 ##
 ## More to come (capture, unlock helper).
 
-import std/[os, json, strutils, uri, osproc, streams, posix]
+import std/[os, json, strutils, uri, osproc, streams, posix, times]
 import vw_autofill/[vault, rule, daemon, linux_consts]
 
 proc isForeground(): bool =
@@ -20,6 +20,73 @@ proc isForeground(): bool =
   let fg = tcgetpgrp(0.cint)
   if fg == -1: return false  ## no controlling terminal at all
   return fg == getpgrp()
+
+proc persistedSessionPath(): string =
+  let dir = getConfigDir() / "vw-autofill"
+  if not dirExists(dir):
+    createDir(dir)
+  dir / "session"
+
+proc readPersistedSession(): string =
+  let p = persistedSessionPath()
+  if not fileExists(p): return ""
+  try:
+    result = readFile(p).strip()
+  except IOError:
+    result = ""
+
+proc writePersistedSession(token: string) =
+  let p = persistedSessionPath()
+  try:
+    writeFile(p, token)
+    when defined(posix):
+      setFilePermissions(p, {fpUserRead, fpUserWrite})
+  except CatchableError as e:
+    stderr.writeLine "WARNING: failed to persist session to " & p &
+      ": " & e.msg
+
+proc spawnUnlockTerminal(): bool =
+  ## Pop open a terminal running `./bin/vw_autofill unlock`. Used by
+  ## cmdDaemon when it needs the master password but can't prompt
+  ## itself (PLAN.md §13.1). Returns true if a terminal was launched.
+  let self = getAppFilename()
+  let cmd = @[self, "unlock"]
+  var tries: seq[tuple[exe: string, flags: seq[string]]] = @[]
+  let term = getEnv("TERMINAL")
+  if term.len > 0:
+    tries.add((term, @["-e"]))
+  for c in [
+    ("konsole",        @["-e"]),
+    ("kitty",          newSeq[string]()),
+    ("alacritty",      @["-e"]),
+    ("gnome-terminal", @["--"]),
+    ("xterm",          @["-e"]),
+  ]:
+    tries.add(c)
+  for t in tries:
+    if findExe(t.exe).len == 0: continue
+    try:
+      let args = t.flags & cmd
+      let p = startProcess(t.exe, args = args, options = {poUsePath})
+      p.close()  # fire-and-forget; child keeps running
+      stderr.writeLine "spawned " & t.exe & " for unlock"
+      return true
+    except OSError:
+      continue
+  return false
+
+proc waitForSessionUpdate(initial: times.Time, timeoutSec = 120): string =
+  ## Poll the persisted session file for an mtime > `initial`. Returns
+  ## the new token, or empty string on timeout.
+  let p = persistedSessionPath()
+  let deadline = getTime() + initDuration(seconds = timeoutSec)
+  while getTime() < deadline:
+    if fileExists(p):
+      let mt = getLastModificationTime(p)
+      if mt > initial:
+        return readPersistedSession()
+    sleep(200)
+  return ""
 
 proc requireDaemon() =
   try:
@@ -60,31 +127,6 @@ proc bwUnlockInteractive(): string =
   if code != 0 or token.len == 0:
     raise newException(IOError, "bw unlock failed (exit " & $code & ")")
   result = token
-
-proc persistedSessionPath(): string =
-  let dir = getConfigDir() / "vw-autofill"
-  if not dirExists(dir):
-    createDir(dir)
-  dir / "session"
-
-proc readPersistedSession(): string =
-  let p = persistedSessionPath()
-  if not fileExists(p): return ""
-  try:
-    result = readFile(p).strip()
-  except IOError:
-    result = ""
-
-proc writePersistedSession(token: string) =
-  let p = persistedSessionPath()
-  try:
-    writeFile(p, token)
-    when defined(posix):
-      # Mode 0600 so other users on the box can't read the token.
-      setFilePermissions(p, {fpUserRead, fpUserWrite})
-  except CatchableError as e:
-    stderr.writeLine "WARNING: failed to persist session to " & p &
-      ": " & e.msg
 
 proc readBwSession(): string =
   ## Priority:
@@ -221,16 +263,33 @@ proc cmdDaemon() =
   if not trySession(getEnv("BW_SESSION"), "BW_SESSION env"):
     if not trySession(readPersistedSession(),
                       "cached session from " & persistedSessionPath()):
-      if not isForeground():
-        stderr.writeLine "Daemon is backgrounded; can't prompt for master password."
-        stderr.writeLine "Run `./bin/vw_autofill unlock` in a foreground shell first,"
-        stderr.writeLine "then re-launch the daemon."
-        quit 1
-      let token = bwUnlockInteractive()
-      writePersistedSession(token)
-      if not trySession(token, "fresh unlock"):
-        stderr.writeLine "could not load vault even after fresh unlock"
-        quit 1
+      if isForeground():
+        let token = bwUnlockInteractive()
+        writePersistedSession(token)
+        if not trySession(token, "fresh unlock"):
+          stderr.writeLine "could not load vault even after fresh unlock"
+          quit 1
+      else:
+        # Per PLAN §13.1: when we can't prompt ourselves (backgrounded,
+        # autostarted, etc.), spawn the user's terminal running
+        # `vw-autofill unlock`. We then wait for the persisted session
+        # file to update.
+        let p = persistedSessionPath()
+        let initialMtime =
+          if fileExists(p): getLastModificationTime(p)
+          else: fromUnix(0)
+        if not spawnUnlockTerminal():
+          stderr.writeLine "No terminal emulator found."
+          stderr.writeLine "Run `./bin/vw_autofill unlock` in a foreground shell."
+          quit 1
+        stderr.writeLine "Waiting for unlock (up to 2 minutes)..."
+        let token = waitForSessionUpdate(initialMtime)
+        if token.len == 0:
+          stderr.writeLine "Timed out waiting for unlock."
+          quit 1
+        if not trySession(token, "spawned-terminal unlock"):
+          stderr.writeLine "Spawned unlock produced a token but vault still won't open."
+          quit 1
 
   let socket = getEnv("YDOTOOL_SOCKET", DefaultYdotoolSocket)
   let logPath = getEnv("VW_AUTOFILL_LOG", "/tmp/vw-autofill-daemon.log")
