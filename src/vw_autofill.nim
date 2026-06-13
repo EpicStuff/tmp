@@ -91,7 +91,10 @@ proc waitForSessionUpdate(initial: times.Time, timeoutSec = 120): string =
 proc requireDaemon() =
   try:
     discard sendIntrospect()
-  except CatchableError as e:
+  except Exception as e:
+    ## nim-dbus's DbusException inherits straight from Exception, not
+    ## CatchableError -- so `except CatchableError` would let it propagate
+    ## and print a stack trace instead of our friendly message.
     stderr.writeLine "Daemon not reachable: " & e.msg
     stderr.writeLine "Start it first: ./bin/vw_autofill daemon"
     quit 1
@@ -306,10 +309,12 @@ proc cmdDaemon() =
   d.serve()
 
 proc cmdReload() =
+  requireDaemon()
   let n = sendReload()
   echo "reloaded: ", n, " rule(s)"
 
 proc cmdFill() =
+  requireDaemon()
   sendFill()
 
 proc cmdUnlock() =
@@ -326,6 +331,7 @@ proc cmdUnlock() =
 proc cmdIntrospect() =
   ## Talk to the running daemon via the same nim-dbus library it serves
   ## with — bypasses busctl's introspect quirks.
+  requireDaemon()
   echo sendIntrospect()
 
 proc cmdSimulate() =
@@ -339,6 +345,7 @@ proc cmdSimulate() =
   let title = paramStr(3)
   let cls   = if paramCount() >= 4: paramStr(4) else: ""
   let pid   = if paramCount() >= 5: parseUInt(paramStr(5)).uint32 else: 0'u32
+  requireDaemon()
   sendWindowActivated(exe, title, cls, pid)
   echo "sent WindowActivated(exe=", exe, ", title=", title,
        ", class=", cls, ", pid=", pid, ")"
@@ -389,17 +396,13 @@ proc cmdCapture() =
   ##   5. fzf-pick the vault item
   ##   6. prompt for sequence / matchers / mode
   ##   7. ask daemon to push URI to the chosen item (and reload its cache)
-  try:
-    discard sendIntrospect()
-  except CatchableError as e:
-    stderr.writeLine "Daemon not reachable: " & e.msg
-    stderr.writeLine "Start it first: ./bin/vw_autofill daemon"
-    quit 1
+  requireDaemon()
 
   var items: tuple[ids, names: seq[string]]
   try:
     items = sendListItems()
-  except CatchableError as e:
+  except Exception as e:
+    ## nim-dbus exceptions inherit from Exception, not CatchableError
     stderr.writeLine "ListItems failed: " & e.msg
     quit 1
   if items.ids.len == 0:

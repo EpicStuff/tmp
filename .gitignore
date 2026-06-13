@@ -2,3 +2,6 @@ bin/
 nimcache/
 *.exe
 .swp
+nimble.develop
+nimble.paths
+nimbledeps
