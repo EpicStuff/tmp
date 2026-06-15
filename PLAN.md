@@ -93,8 +93,8 @@ vw-autofill match               # [TODO] print which rules would match the foreg
 vw-autofill doctor              # [TODO] environment self-check, see §15a
 vw-autofill enable-autostart    # [TODO]
 vw-autofill disable-autostart   # [TODO]
-vw-autofill install-kwin-script    # [TODO] (Linux only; today done by kpackagetool6)
-vw-autofill uninstall-kwin-script  # [TODO]
+vw-autofill install                # [DONE] (Linux only; vendors keyd-application-mapper + kglobalaccel .desktop)
+vw-autofill uninstall              # [DONE]
 ```
 
 `daemon` is the long-running process; every other subcommand is a
@@ -125,8 +125,13 @@ match" case from the other direction.)
 2. Make `bw` reachable: PATH, or next to the binary, or pin with
 	`bw_path:` in config (config wins).
 3. `bw config server https://your.vaultwarden.host && bw login`.
-4. Linux only: `vw-autofill install-kwin-script` then enable in
-	System Settings → KWin Scripts. On first fill, KDE prompts to
+4. Linux only: `vw-autofill install` symlinks
+	`share/kglobalaccel/vw-autofill.desktop` into
+	`~/.local/share/kglobalaccel/` (kglobalacceld auto-discovers the
+	`Meta+Alt+V` shortcut on next session start) and writes an XDG
+	autostart entry that launches `bin/vw-window-monitor` on login.
+	The monitor injects a KWin script that forwards window-activation
+	events to the daemon over D-Bus. On first fill, KDE prompts to
 	allow keyboard/mouse control — tick "Remember" and approve; the
 	portal restore token is cached in the config dir. For ydotool
 	instead, see §12.1.
@@ -282,8 +287,8 @@ will reload on next vault sync (`bw sync`).
 ```
 vw-autofill disable-autostart
 vw-autofill stop
-vw-autofill uninstall-kwin-script   # Linux only
-rm -rf ~/.config/vw-autofill        # or %APPDATA%\vw-autofill on Windows
+vw-autofill uninstall                  # Linux only
+rm -rf ~/.config/vw-autofill           # or %APPDATA%\vw-autofill on Windows
 # vault items keep their winapp:// URIs — inert without the daemon
 ```
 
@@ -309,9 +314,12 @@ vaultwarden-autofill/
 │   ├── platform_linux.nim     # KWin event recv, portal/ydotool typing, AT-SPI
 │   ├── platform_windows.nim   # WinEventHook, SendInput, UIA, hotkey
 │   └── platform_windows_uia.nim  # IUIAutomation COM wrappers
-├── kwin-script/
-│   ├── metadata.json          # KWin script metadata
-│   └── contents/code/main.js  # workspace.windowActivated handler
+├── bin/
+│   └── vw-window-monitor      # Python: detects keyd-app-mapper, else
+│                              #         injects KWin script + claims org.rvaiya.keyd
+├── share/kglobalaccel/
+│   └── vw-autofill.desktop    # X-KDE-Shortcuts=Meta+Alt+V -> dbus-send Fill
+├── vendor/keyd/               # submodule: github.com/rvaiya/keyd (reference)
 ├── packaging/
 │   ├── windows/
 │   │   ├── manifest.xml       # asInvoker
@@ -615,31 +623,43 @@ Cooldown keyed by `(uri, hwnd-or-windowId)`, lasts the URI's
 
 ### Linux (KDE Plasma 6 Wayland)
 
-**Status:** core path [DONE] — KWin script → D-Bus → daemon → ydotool
-typing. AT-SPI [TODO]. Portal RemoteDesktop [DEFERRED] (denies on user's
-session; kept as future no-admin distribution path).
+**Status:** core path [DONE] — vw-window-monitor → KWin script → D-Bus
+→ daemon → ydotool typing. AT-SPI [TODO]. Portal RemoteDesktop
+[DEFERRED] (denies on user's session; kept as future no-admin
+distribution path).
 
-**KWin script** (`data/kwin-script/contents/code/main.js`):
+**Window monitor** (`bin/vw-window-monitor`, Python): borrows keyd's
+KDE-class pattern (see `vendor/keyd/scripts/keyd-application-mapper`).
+At startup it checks whether keyd's official application-mapper
+already owns `org.rvaiya.keyd` on the session bus:
 
-```javascript
-workspace.windowActivated.connect(function (w) {
-	if (!w) return;
-	const payload = JSON.stringify({
-		pid: w.pid,
-		caption: w.caption,
-		resourceClass: ('' + w.resourceClass),
-	});
-	callDBus(
-		'org.user.VwAutofill', '/Daemon',
-		'org.user.VwAutofill', 'WindowActivated',
-		payload
-	);
-});
-```
+  * **Mode A** (mapper already running): becomes a passive D-Bus
+    monitor (`org.freedesktop.DBus.Monitoring.BecomeMonitor`) filtered
+    for `updateWindow` method-calls keyd sends to itself, and forwards
+    each to vw-autofill's `WindowActivated`. No KWin script of our own.
 
-Installed via `kpackagetool6 -t KWin/Script -i kwin-script/` or
-dropped in `~/.local/share/kwin/scripts/`; enabled via System Settings
-→ KWin Scripts.
+  * **Mode B** (nothing owns the name): claims `org.rvaiya.keyd`
+    itself, transiently loads the same `workspace.windowActivated →
+    callDBus(updateWindow)` script via `org.kde.KWin /Scripting
+    loadScript`, serves the method, forwards.
+
+Either mode produces identical 3-arg `WindowActivated(exe, title,
+class)` calls to the daemon; no PID is captured.
+
+Why interpreted Python and not a Nuitka-compiled binary: Nuitka 4.1.2's
+`gi` plugin trips an override-loader assertion (`unix_signal_add_full
+was set deprecated but wasn't added to __all__`) on PyGObject ≥ 3.50
+the moment `from gi.repository import GLib` runs in the bundled
+binary. Plus Arch's patchelf 0.18.0 is on Nuitka's known-buggy list.
+Both are upstream issues; revisit when either ships a fix.
+
+**Install**: `vw-autofill install` symlinks
+`share/kglobalaccel/vw-autofill.desktop` into
+`~/.local/share/kglobalaccel/` (kglobalacceld auto-discovers and binds
+`Meta+Alt+V` to `dbus-send ... org.vwautofill.Daemon1.Fill`, per
+`X-KDE-Shortcuts=` + `X-KDE-GlobalAccel-CommandShortcut=true`) and
+writes an XDG autostart entry that launches the monitor on session
+login.
 
 **Daemon side**: [DONE] registers D-Bus name `org.vwautofill.Daemon`
 (actual name; differs from plan above). Methods landed:
@@ -666,9 +686,11 @@ text])`, key codes for Tab/Enter. Hardcoded device id
 `ydotoold` running. udev/group setup is the user's responsibility
 today; systemd user unit is on the to-do list.
 
-**Hotkey**: [DONE] **revised approach** — the KWin script itself
-registers the shortcut via `registerShortcut` (default `Meta+Alt+V`),
-visible/rebindable under System Settings → Shortcuts → KWin. No KDE
+**Hotkey**: [DONE] **revised approach #2** — kglobalacceld picks up
+`share/kglobalaccel/vw-autofill.desktop` (`X-KDE-Shortcuts=Meta+Alt+V`,
+`X-KDE-GlobalAccel-CommandShortcut=true`) and routes the chord to
+`dbus-send ... Fill`. Visible/rebindable under System Settings →
+Shortcuts (search `vw-autofill`). No
 Custom Shortcut / khotkeys involvement needed. There's also a wrapper
 script `scripts/vw-fill-shortcut.sh` if the user prefers to bind via
 Custom Shortcuts (kept for diagnosis; logs invocations).

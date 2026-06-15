@@ -1,0 +1,3 @@
+[submodule "vendor/keyd"]
+	path = vendor/keyd
+	url = https://github.com/rvaiya/keyd.git

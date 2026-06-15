@@ -1,4 +1,4 @@
-bin/
+/bin/vw_autofill
 nimcache/
 *.exe
 .swp

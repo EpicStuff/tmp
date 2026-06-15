@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=vw-autofill
+GenericName=Vaultwarden autofill
+Comment=Fill credentials from Vaultwarden into the focused window
+NoDisplay=true
+Icon=preferences-desktop-keyboard
+Exec=dbus-send --session --type=method_call --dest=org.vwautofill.Daemon /org/vwautofill/Daemon org.vwautofill.Daemon1.Fill
+X-KDE-GlobalAccel-CommandShortcut=true
+X-KDE-Shortcuts=Meta+Alt+V

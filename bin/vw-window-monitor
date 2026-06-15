@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+# vw-autofill window monitor.
+#
+# Watches KDE/KWin window-activation events and forwards each one to the
+# vw-autofill daemon over the session D-Bus bus as:
+#
+#   org.vwautofill.Daemon (/org/vwautofill/Daemon)
+#       org.vwautofill.Daemon1.WindowActivated(s exe, s title, s class)
+#
+# Two-mode operation, chosen at startup by checking whether keyd's
+# application-mapper already owns org.rvaiya.keyd on the session bus:
+#
+#   Mode A (keyd-application-mapper already running):
+#       Become a passive D-Bus monitor (org.freedesktop.DBus.Monitoring.
+#       BecomeMonitor) filtered for the updateWindow method-calls keyd
+#       sends to itself, and forward each one to the vw-autofill daemon.
+#       No KWin script injection — keyd already installed its own.
+#
+#   Mode B (nothing owns org.rvaiya.keyd):
+#       Claim the name ourselves, inject the same tiny KWin script keyd
+#       uses (workspace.windowActivated -> callDBus updateWindow), and
+#       serve the updateWindow method.
+#
+# Either way the daemon receives identical WindowActivated calls, so
+# the rest of vw-autofill doesn't need to know which mode is active.
+#
+# Vendored from keyd's KDE class: vendor/keyd/scripts/keyd-application-mapper
+
+import os
+import sys
+import time
+
+import dbus
+import dbus.service
+import dbus.mainloop.glib
+from dbus.lowlevel import MethodCallMessage, HANDLER_RESULT_NOT_YET_HANDLED
+from gi.repository import GLib
+
+DAEMON_SERVICE = 'org.vwautofill.Daemon'
+DAEMON_PATH    = '/org/vwautofill/Daemon'
+DAEMON_IFACE   = 'org.vwautofill.Daemon1'
+
+KEYD_SERVICE   = 'org.rvaiya.keyd'
+KEYD_PATH      = '/listener'
+KEYD_IFACE     = 'org.rvaiya.keyd'
+
+KWIN_SCRIPT_JS = (
+	'workspace.windowActivated.connect(client => {\n'
+	'    if (!client) return;\n'
+	'    callDBus("%s", "%s", "", "updateWindow",\n'
+	'             (client.caption||"").toString(),\n'
+	'             (client.resourceClass||"").toString(),\n'
+	'             (client.resourceName||"").toString());\n'
+	'});\n'
+) % (KEYD_SERVICE, KEYD_PATH)
+
+
+def log(msg):
+	sys.stderr.write('vw-window-monitor: ' + msg + '\n')
+	sys.stderr.flush()
+
+
+def forward_to_daemon(send_bus, exe, title, klass):
+	try:
+		obj = send_bus.get_object(DAEMON_SERVICE, DAEMON_PATH)
+		iface = dbus.Interface(obj, DAEMON_IFACE)
+		iface.WindowActivated(exe, title, klass)
+	except dbus.exceptions.DBusException as e:
+		# Daemon not on the bus yet is normal during startup; log so
+		# the user can see whether activations are reaching us at all.
+		log('forward failed: ' + str(e))
+
+
+def name_has_owner(bus, name):
+	proxy = bus.get_object('org.freedesktop.DBus', '/org/freedesktop/DBus')
+	iface = dbus.Interface(proxy, 'org.freedesktop.DBus')
+	return bool(iface.NameHasOwner(name))
+
+
+def wait_for_kwin(bus, max_seconds=10):
+	# During session startup we may race kwin_wayland coming up.
+	last_err = None
+	for _ in range(max_seconds):
+		try:
+			return bus.get_object('org.kde.KWin', '/Scripting')
+		except dbus.exceptions.DBusException as e:
+			last_err = e
+			time.sleep(1)
+	log('KWin Scripting object not on bus after %ds: %s' % (max_seconds, last_err))
+	sys.exit(1)
+
+
+def inject_kwin_script(bus):
+	js_path = '/tmp/vw-autofill-kwin-%d.js' % os.getuid()
+	with open(js_path, 'w') as f:
+		f.write(KWIN_SCRIPT_JS)
+
+	kwin = wait_for_kwin(bus)
+	# Unload any prior copy so we don't run the same hook twice.
+	try:
+		kwin.unloadScript(js_path)
+	except dbus.exceptions.DBusException:
+		pass
+	script_id = int(kwin.loadScript(js_path))
+	script_obj = bus.get_object('org.kde.KWin', '/Scripting/Script%d' % script_id)
+	script_obj.run()
+	log('KWin script loaded (id=%d, path=%s)' % (script_id, js_path))
+
+
+def run_mode_a(monitor_bus, send_bus):
+	def handler(_bus, msg):
+		if isinstance(msg, MethodCallMessage) \
+				and msg.get_member() == 'updateWindow' \
+				and msg.get_path() == KEYD_PATH:
+			args = list(msg.get_args_list())
+			if len(args) >= 3:
+				title = str(args[0])
+				klass = str(args[1])
+				exe   = str(args[2])
+				forward_to_daemon(send_bus, exe, title, klass)
+		return HANDLER_RESULT_NOT_YET_HANDLED
+
+	monitor_bus.add_message_filter(handler)
+	proxy = monitor_bus.get_object('org.freedesktop.DBus', '/org/freedesktop/DBus')
+	mon = dbus.Interface(proxy, 'org.freedesktop.DBus.Monitoring')
+	mon.BecomeMonitor(
+		["type='method_call',path='%s',member='updateWindow'" % KEYD_PATH],
+		dbus.UInt32(0),
+	)
+	log('mode A: monitoring existing keyd-application-mapper')
+	GLib.MainLoop().run()
+
+
+def run_mode_b(bus):
+	class Listener(dbus.service.Object):
+		def __init__(self):
+			super().__init__(dbus.service.BusName(KEYD_SERVICE, bus), KEYD_PATH)
+
+		@dbus.service.method(KEYD_IFACE, in_signature='sss')
+		def updateWindow(self, title, klass, exe):
+			forward_to_daemon(bus, str(exe), str(title), str(klass))
+
+	Listener()
+	inject_kwin_script(bus)
+	log('mode B: owning %s and our own KWin script' % KEYD_SERVICE)
+	GLib.MainLoop().run()
+
+
+def main():
+	dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+	bus = dbus.SessionBus()
+
+	if name_has_owner(bus, KEYD_SERVICE):
+		# BecomeMonitor turns the receiving connection read-only, so
+		# outbound forwarding needs a second connection.
+		send_bus = dbus.SessionBus(private=True)
+		run_mode_a(bus, send_bus)
+	else:
+		run_mode_b(bus)
+
+
+if __name__ == '__main__':
+	main()

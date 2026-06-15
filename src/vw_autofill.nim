@@ -153,17 +153,6 @@ proc readBwSession(): string =
   stderr.writeLine "Session cached at " & persistedSessionPath()
   result = token
 
-proc findKwinScriptSource(): string =
-  ## Look for data/kwin-script relative to the binary (the usual repo
-  ## layout: <repo>/bin/vw_autofill + <repo>/data/kwin-script), then
-  ## next to it (in case the binary was installed alongside).
-  let exeDir = getAppFilename().parentDir
-  let repoLayout = exeDir.parentDir / "data" / "kwin-script"
-  if dirExists(repoLayout): return repoLayout
-  let installedLayout = exeDir / "kwin-script"
-  if dirExists(installedLayout): return installedLayout
-  return ""
-
 proc runCheck(cmd: string): tuple[output: string, code: int] =
   let r = execCmdEx(cmd)
   (r.output, r.exitCode)
@@ -172,174 +161,127 @@ proc step(ok: bool, msg: string) =
   let mark = if ok: "[ok]  " else: "[fail]"
   echo mark & " " & msg
 
-proc findKdeTool(names: openArray[string]): string =
-  ## Different distros ship different binary names for the Qt6 helpers
-  ## (qdbus6 / qdbus-qt6 / qdbus, kpackagetool6 / kf6-kpackagetool, ...).
-  ## Pick the first that's on PATH.
-  for n in names:
-    if findExe(n).len > 0: return n
-  return ""
+proc findRepoLayout(): tuple[monitor, kglobalaccelDesktop: string] =
+  ## Resolve the bin/vw-window-monitor and share/kglobalaccel/vw-autofill.desktop
+  ## paths relative to this binary. Repo layout: <repo>/bin/vw_autofill +
+  ## <repo>/bin/vw-window-monitor + <repo>/share/kglobalaccel/vw-autofill.desktop.
+  let exeDir = getAppFilename().parentDir
+  let repoRoot = exeDir.parentDir
+  result.monitor = repoRoot / "bin" / "vw-window-monitor"
+  result.kglobalaccelDesktop = repoRoot / "share" / "kglobalaccel" / "vw-autofill.desktop"
 
-proc kwinDbusCall(qdbus, busctl, service, path, iface, meth: string,
-                  args: openArray[string] = []): tuple[output: string, code: int] =
-  ## Prefer qdbus (matches everything we read in docs / blog posts).
-  ## Fall back to busctl when qdbus6/qdbus-qt6/qdbus isn't installed --
-  ## busctl is part of systemd and present basically everywhere.
-  if qdbus.len > 0:
-    var cmd = qdbus & " " & service & " " & path & " " & iface & "." & meth
-    for a in args: cmd.add(" " & quoteShell(a))
-    return runCheck(cmd)
-  if busctl.len > 0:
-    var cmd = busctl & " --user call " & service & " " & path & " " &
-              iface & " " & meth
-    for a in args: cmd.add(" " & quoteShell(a))
-    return runCheck(cmd)
-  return ("(no qdbus or busctl available)", 127)
+proc kglobalaccelDestDir(): string =
+  getHomeDir() / ".local/share/kglobalaccel"
 
-proc installedScriptPath(): string =
-  getHomeDir() / ".local/share/kwin/scripts/vw-autofill-watcher/contents/code/main.js"
+proc autostartDestDir(): string =
+  getHomeDir() / ".config/autostart"
 
-proc cmdInstallKwinScript() =
-  ## End-to-end KWin script installer + verifier.
+proc autostartDesktopBody(monitorPath: string): string =
+  ## XDG autostart entry that spawns vw-window-monitor on session login.
+  ## Uses the absolute path to the Python script so PATH order can't
+  ## resolve a stale copy.
+  "[Desktop Entry]\n" &
+  "Type=Application\n" &
+  "Name=vw-autofill window monitor\n" &
+  "Comment=Forward KWin window-activation events to the vw-autofill daemon\n" &
+  "Exec=" & monitorPath & "\n" &
+  "X-GNOME-Autostart-enabled=true\n" &
+  "OnlyShowIn=KDE;\n" &
+  "NoDisplay=true\n"
+
+proc symlinkOrCopy(src, dst: string): bool =
+  ## Symlink if possible; copy as a fallback (some filesystems don't
+  ## support symlinks). Returns true on success.
+  try:
+    removeFile(dst)
+  except OSError, IOError:
+    discard
+  try:
+    createSymlink(src, dst)
+    return true
+  except OSError, IOError:
+    try:
+      copyFile(src, dst)
+      return true
+    except OSError, IOError:
+      return false
+
+proc cmdInstall() =
+  ## Install the window-monitor + the .desktop file kglobalacceld picks
+  ## up to wire Meta+Alt+V to the daemon's Fill() method.
   ##
-  ## Each step prints [ok]/[fail]. After the reload, polls the daemon
-  ## log for "[kwin-script]" entries -- which is the only reliable proof
-  ## that KWin actually started running the new script. (Plasma 6 caches
-  ## script bytecode aggressively; the file can be on disk and the
-  ## plugin "enabled" without the new code ever loading.)
-  let src = findKwinScriptSource()
-  if src.len == 0:
-    stderr.writeLine "[fail] could not find data/kwin-script next to the binary"
-    quit 1
-  echo "source:    ", src
-  let logPath = getEnv("VW_AUTOFILL_LOG", "/tmp/vw-autofill-daemon.log")
-  echo "log:       ", logPath
+  ## Symlinks (or copies, if the FS rejects symlinks):
+  ##   <repo>/share/kglobalaccel/vw-autofill.desktop ->
+  ##       ~/.local/share/kglobalaccel/vw-autofill.desktop
+  ##   autostart shim runs <repo>/bin/vw-window-monitor on session login:
+  ##       ~/.config/autostart/vw-autofill-window-monitor.desktop
+  let layout = findRepoLayout()
 
-  # Locate KDE helpers; report missing ones up front so the user knows
-  # what to install if a step fails.
-  let kpackage    = findKdeTool(["kpackagetool6", "kf6-kpackagetool", "kpackagetool"])
-  let kwriteconf  = findKdeTool(["kwriteconfig6", "kf6-kwriteconfig", "kwriteconfig5"])
-  let qdbus       = findKdeTool(["qdbus6", "qdbus-qt6", "qdbus"])
-  let busctl      = findExe("busctl")
-  step(kpackage.len > 0,   "kpackagetool: " & (if kpackage.len > 0: kpackage else: "MISSING (install plasma-workspace)"))
-  step(kwriteconf.len > 0, "kwriteconfig: " & (if kwriteconf.len > 0: kwriteconf else: "MISSING (install kconfig)"))
-  step(qdbus.len > 0 or busctl.len > 0,
-       "dbus client:  " & (if qdbus.len > 0: qdbus elif busctl.len > 0: busctl & " (qdbus6 not found)" else: "MISSING"))
-  if kpackage.len == 0 or kwriteconf.len == 0 or (qdbus.len == 0 and busctl.len == 0):
+  step(fileExists(layout.monitor),
+       "monitor source: " & layout.monitor)
+  step(fileExists(layout.kglobalaccelDesktop),
+       ".desktop source: " & layout.kglobalaccelDesktop)
+  if not fileExists(layout.monitor) or not fileExists(layout.kglobalaccelDesktop):
     quit 1
 
-  # If the daemon isn't on the bus, the [kwin-script] log entries won't
-  # be captured -- still install, but warn so the diagnostic at the end
-  # is interpreted correctly.
-  let (busOut, _) = runCheck(busctl & " --user list 2>/dev/null")
-  let daemonUp = "org.vwautofill.Daemon" in busOut
-  step(daemonUp, "daemon on bus: " &
-       (if daemonUp: "yes" else: "NO (script load diagnostic won't appear in log)"))
+  # Verify the Python deps the monitor needs at runtime. Catch this up
+  # front instead of as a confusing autostart failure later.
+  let pyCheck = "python3 -c " & quoteShell(
+    "import dbus, dbus.mainloop.glib, gi.repository.GLib")
+  let (pcOut, pcCode) = runCheck(pyCheck & " 2>&1")
+  step(pcCode == 0, "python3 deps (dbus, gi.repository.GLib): " &
+       (if pcCode == 0: "ok" else: "MISSING -- " & pcOut.strip))
+  if pcCode != 0:
+    echo ""
+    echo "Install with: sudo pacman -S python-dbus python-gobject"
+    quit 1
 
-  # 1. Remove any prior install so Plasma can't reuse cached bytecode.
-  let (_, _) = runCheck(kpackage & " -t KWin/Script -r vw-autofill-watcher")
+  let kglobalaccelDst = kglobalaccelDestDir() / "vw-autofill.desktop"
+  createDir(kglobalaccelDestDir())
+  let okKga = symlinkOrCopy(layout.kglobalaccelDesktop, kglobalaccelDst)
+  step(okKga, kglobalaccelDst)
+  if not okKga: quit 1
 
-  # 2. Fresh install.
-  let (iOut, iCode) = runCheck(
-    kpackage & " -t KWin/Script -i " & quoteShell(src))
-  step(iCode == 0, "kpackagetool install" &
-       (if iCode != 0: " -- " & iOut.strip else: ""))
-  if iCode != 0: quit 1
+  let autostartDst = autostartDestDir() / "vw-autofill-window-monitor.desktop"
+  createDir(autostartDestDir())
+  writeFile(autostartDst, autostartDesktopBody(layout.monitor))
+  step(fileExists(autostartDst), autostartDst)
 
-  # 3. Verify the file actually landed.
-  let dst = installedScriptPath()
-  let fileLanded = fileExists(dst)
-  step(fileLanded, "installed file: " & dst)
-  if not fileLanded: quit 1
-
-  # 4. Sanity: installed file matches source (catches stale-package weirdness).
-  let srcMain = src / "contents" / "code" / "main.js"
-  if fileExists(srcMain) and fileLanded:
-    let same = readFile(srcMain) == readFile(dst)
-    step(same, "installed file matches source")
-
-  # 5. Enable in kwinrc.
-  let (eOut, eCode) = runCheck(kwriteconf & " --file kwinrc --group Plugins " &
-                               "--key vw-autofill-watcherEnabled true")
-  step(eCode == 0, "kwinrc Plugins/vw-autofill-watcherEnabled = true" &
-       (if eCode != 0: " -- " & eOut.strip else: ""))
-
-  # 6. Tell KWin to re-read config (picks up the enable). On Plasma 6
-  # this is the canonical way to load/unload scripts; Scripting.start
-  # alone won't pick up a freshly-enabled script reliably.
-  let (rcOut, rcCode) = kwinDbusCall(
-    qdbus, busctl, "org.kde.KWin", "/KWin", "org.kde.KWin", "reconfigure")
-  step(rcCode == 0, "KWin reconfigure" &
-       (if rcCode != 0: " -- " & rcOut.strip else: ""))
-
-  # 7. Belt-and-braces: also poke Scripting.start in case reconfigure
-  # didn't trigger a script-engine restart on this KWin version.
-  let (sOut, sCode) = kwinDbusCall(
-    qdbus, busctl, "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", "start")
-  step(sCode == 0, "Scripting.start" &
-       (if sCode != 0: " -- " & sOut.strip else: ""))
-
-  # 8. Diagnostic: wait up to 3s for "[kwin-script]" to show up in the
-  # daemon log. If it doesn't, the script almost certainly didn't load.
-  echo ""
-  echo "waiting up to 3s for the script to phone home..."
-  let logSizeBefore = if fileExists(logPath): getFileSize(logPath) else: 0
-  var scriptPhonedHome = false
-  for i in 0 .. 15:
-    sleep(200)
-    if fileExists(logPath):
-      let f = open(logPath, fmRead)
-      defer: f.close()
-      f.setFilePos(logSizeBefore)
-      let tail = f.readAll()
-      if "[kwin-script]" in tail:
-        scriptPhonedHome = true
-        echo ""
-        echo "--- new [kwin-script] entries: ---"
-        for line in tail.splitLines:
-          if "[kwin-script]" in line: echo line
-        break
+  # Nudge kglobalacceld to rescan the kglobalaccel/ directory. If the
+  # service isn't running yet (rare), the .desktop will be picked up on
+  # next session start regardless.
+  let busctl = findExe("busctl")
+  if busctl.len > 0:
+    discard runCheck(busctl & " --user call org.kde.kglobalaccel " &
+                     "/kglobalaccel org.kde.KGlobalAccel reloadComponent " &
+                     "vw-autofill.desktop 2>/dev/null")
 
   echo ""
-  if scriptPhonedHome:
-    step(true, "script loaded and called daemon.Log()")
+  echo "Window monitor and shortcut installed. To start the monitor now"
+  echo "without logging out and back in:"
+  echo "    nohup " & layout.monitor & " >/tmp/vw-window-monitor.log 2>&1 &"
+  echo ""
+  echo "Default Fill shortcut: Meta+Alt+V (rebind in System Settings ->"
+  echo "Shortcuts, search 'vw-autofill')."
+
+proc cmdUninstall() =
+  let kglobalaccelDst = kglobalaccelDestDir() / "vw-autofill.desktop"
+  let autostartDst    = autostartDestDir() / "vw-autofill-window-monitor.desktop"
+  for p in [kglobalaccelDst, autostartDst]:
+    if fileExists(p) or symlinkExists(p):
+      try:
+        removeFile(p)
+        step(true, "removed " & p)
+      except CatchableError as e:
+        step(false, "remove " & p & ": " & e.msg)
+    else:
+      step(true, "not present: " & p)
+
+  let pidf = runCheck("pgrep -f vw-window-monitor 2>/dev/null")
+  if pidf.code == 0 and pidf.output.strip.len > 0:
     echo ""
-    echo "Default Fill shortcut: Meta+Alt+V."
-    echo "Rebind in System Settings -> Shortcuts (search 'vw-autofill')."
-  else:
-    step(false, "no [kwin-script] entries in " & logPath & " after 3s")
-    echo ""
-    echo "The package is on disk and enabled but KWin doesn't seem to have"
-    echo "loaded it. Things to try:"
-    echo "  1. Make sure the daemon is running first, then re-run this command."
-    echo "     (without the daemon, Log() calls go nowhere -- the script may"
-    echo "      have loaded just fine, we just couldn't observe it.)"
-    echo "  2. Log out of your Plasma session and back in. KWin re-reads"
-    echo "     scripts on session start; mid-session reload is flaky."
-    echo "  3. If you're on X11 instead of Wayland: kwin_x11 --replace &"
-    echo "     (Wayland equivalent requires logging out.)"
-
-proc cmdUninstallKwinScript() =
-  let kpackage   = findKdeTool(["kpackagetool6", "kf6-kpackagetool", "kpackagetool"])
-  let kwriteconf = findKdeTool(["kwriteconfig6", "kf6-kwriteconfig", "kwriteconfig5"])
-  let qdbus      = findKdeTool(["qdbus6", "qdbus-qt6", "qdbus"])
-  let busctl     = findExe("busctl")
-  if kpackage.len == 0:
-    stderr.writeLine "[fail] kpackagetool6 not found"
-    quit 1
-
-  let (rmOut, rmCode) = runCheck(kpackage & " -t KWin/Script -r vw-autofill-watcher")
-  step(rmCode == 0, "kpackagetool remove" &
-       (if rmCode != 0: " -- " & rmOut.strip else: ""))
-
-  if kwriteconf.len > 0:
-    discard runCheck(kwriteconf & " --file kwinrc --group Plugins " &
-                     "--key vw-autofill-watcherEnabled false")
-    step(true, "kwinrc Plugins/vw-autofill-watcherEnabled = false")
-
-  discard kwinDbusCall(qdbus, busctl, "org.kde.KWin", "/KWin",
-                       "org.kde.KWin", "reconfigure")
-  step(true, "KWin reconfigure")
+    echo "vw-window-monitor is still running. To stop it now:"
+    echo "    pkill -f vw-window-monitor"
 
 proc warnIfNoYdotoold(socket: string) =
   if not fileExists(socket):
@@ -441,19 +383,18 @@ proc cmdIntrospect() =
 
 proc cmdSimulate() =
   ## Synthesize a WindowActivated call to the daemon. Useful for testing
-  ## the matcher path without KWin.
-  ##   vw-autofill simulate <exe> <title> [class] [pid]
+  ## the matcher path without a live window monitor.
+  ##   vw-autofill simulate <exe> <title> [class]
   if paramCount() < 3:
-    stderr.writeLine "usage: vw-autofill simulate <exe> <title> [class] [pid]"
+    stderr.writeLine "usage: vw-autofill simulate <exe> <title> [class]"
     quit 1
   let exe   = paramStr(2)
   let title = paramStr(3)
   let cls   = if paramCount() >= 4: paramStr(4) else: ""
-  let pid   = if paramCount() >= 5: parseUInt(paramStr(5)).uint32 else: 0'u32
   requireDaemon()
-  sendWindowActivated(exe, title, cls, pid)
+  sendWindowActivated(exe, title, cls)
   echo "sent WindowActivated(exe=", exe, ", title=", title,
-       ", class=", cls, ", pid=", pid, ")"
+       ", class=", cls, ")"
 
 proc promptDefault(prompt, default: string): string =
   stdout.write(prompt)
@@ -524,8 +465,9 @@ proc cmdCapture() =
   let win = sendLastWindow()
   if win.exe.len == 0 and win.title.len == 0:
     echo "Daemon has not seen any window activation yet."
-    echo "Is the KWin watcher script enabled and reloaded?"
-    echo "    ./bin/vw_autofill install-kwin-script"
+    echo "Is the window monitor running?"
+    echo "    ./bin/vw_autofill install"
+    echo "    nohup ./bin/vw-window-monitor >/tmp/vw-window-monitor.log 2>&1 &"
     quit 1
   echo "Captured:"
   echo "  exe   = ", win.exe
@@ -590,10 +532,10 @@ Commands:
     fill                  tell a running daemon to fire its cached match
     reload                tell a running daemon to re-fetch rules from bw
     capture               interactive rule builder for the focused window
-    install-kwin-script   install + enable the KWin watcher script
-    uninstall-kwin-script remove the KWin watcher script
+    install              install vw-window-monitor + Meta+Alt+V .desktop
+    uninstall            remove the above
     introspect            fetch the daemon's introspection XML
-    simulate EXE TITLE [CLASS] [PID]
+    simulate EXE TITLE [CLASS]
                           synthesize a WindowActivated D-Bus call
     help                  this message
 
@@ -615,8 +557,8 @@ when isMainModule:
   of "unlock":     cmdUnlock()
   of "reload":     cmdReload()
   of "capture":    cmdCapture()
-  of "install-kwin-script":   cmdInstallKwinScript()
-  of "uninstall-kwin-script": cmdUninstallKwinScript()
+  of "install":   cmdInstall()
+  of "uninstall": cmdUninstall()
   of "introspect": cmdIntrospect()
   of "simulate":   cmdSimulate()
   of "help", "--help", "-h": usage()

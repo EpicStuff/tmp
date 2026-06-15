@@ -1,13 +1,14 @@
 ## Session-bus daemon. Owns org.vwautofill.Daemon at path
 ## /org/vwautofill/Daemon. Two methods:
 ##
-##   WindowActivated(s exe, s title, s class, u pid)
-##     Called by the KWin script whenever focus changes. We update
+##   WindowActivated(s exe, s title, s class)
+##     Called by the window monitor whenever focus changes. We update
 ##     our cached `lastWindow` + recompute the best matching rule.
 ##
 ##   Fill()
-##     Called by the hotkey wrapper. We play the cached match's
-##     sequence through ydotool. No reply args.
+##     Called by the kglobalacceld-dispatched dbus-send (Meta+Alt+V by
+##     default). We play the cached match's sequence through ydotool.
+##     No reply args.
 
 import std/[os, options, json]
 import dbus
@@ -28,7 +29,6 @@ const introspectionXml = """<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Obj
       <arg type="s" name="exe"   direction="in"/>
       <arg type="s" name="title" direction="in"/>
       <arg type="s" name="class" direction="in"/>
-      <arg type="u" name="pid"   direction="in"/>
     </method>
     <method name="Fill"/>
     <method name="LastWindow">
@@ -113,32 +113,15 @@ proc anyString(v: DbusValue): string =
   of dtVariant: anyString(v.variantValue)
   else: ""
 
-proc anyUint(v: DbusValue): uint32 =
-  ## Accept any integer or byte variant. KWin's JS marshals JS numbers
-  ## as int32 even when we declared the iface as uint32 (u); we have
-  ## to be tolerant on the wire even if the XML says one thing.
-  if v == nil: return 0
-  case v.kind
-  of dtByte:   v.byteValue.uint32
-  of dtInt16:  v.int16Value.uint32
-  of dtUint16: v.uint16Value.uint32
-  of dtInt32:  v.int32Value.uint32
-  of dtUint32: v.uint32Value
-  of dtInt64:  v.int64Value.uint32
-  of dtUint64: v.uint64Value.uint32
-  of dtVariant: anyUint(v.variantValue)
-  else: 0
-
 proc handleWindowActivated(d: Daemon, args: seq[DbusValue]): bool =
-  if args.len < 4:
+  if args.len < 3:
     d.log "WindowActivated: bad arg count " & $args.len
     return false
   d.log "  arg kinds=" & $args[0].kind & "," & $args[1].kind &
-        "," & $args[2].kind & "," & $args[3].kind
+        "," & $args[2].kind
   let exe   = anyString(args[0])
   let title = anyString(args[1])
   let cls   = anyString(args[2])
-  let pid   = anyUint(args[3])
   d.lastWindow = WindowInfo(
     exePath: exe,
     exeName: extractFilename(exe),
@@ -150,7 +133,7 @@ proc handleWindowActivated(d: Daemon, args: seq[DbusValue]): bool =
   let label =
     if d.lastMatch.isSome: "match=" & d.lastMatch.get.credential.itemName
     else: "no match"
-  d.log "activated pid=" & $pid & " exe=" & exe & " class=" & cls &
+  d.log "activated exe=" & exe & " class=" & cls &
         " title=" & title & " -> " & label
   true
 
@@ -413,15 +396,14 @@ proc sendIntrospect*(): string =
   var iter = reply.iterate()
   result = iter.unpackCurrent(string)
 
-proc sendWindowActivated*(exe, title, cls: string, pid: uint32) =
+proc sendWindowActivated*(exe, title, cls: string) =
   ## Client side: synthesize a WindowActivated call. Useful for
-  ## testing the matcher path without KWin.
+  ## testing the matcher path without a live window monitor.
   let bus = getBus(DBUS_BUS_SESSION)
   var msg = makeCall(BusName, ObjPath.ObjectPath, IfaceName, "WindowActivated")
   msg.append(exe)
   msg.append(title)
   msg.append(cls)
-  msg.append(pid)
   let pending = bus.sendMessageWithReply(msg)
   let reply = pending.waitForReply()
   defer: reply.close()
