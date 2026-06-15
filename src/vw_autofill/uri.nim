@@ -17,7 +17,10 @@ import std/[options, strutils, uri]
 import ./rule
 
 proc decodeIfNeeded(s: string): string =
-  if '%' in s: decodeUrl(s, decodePlus = false) else: s
+  ## Form-encoded query values: both %20 and + mean space. We always
+  ## run through decodeUrl so rules written with either convention
+  ## (web-style + or path-style %20) match the same window text.
+  decodeUrl(s, decodePlus = true)
 
 proc parseRuleUri*(s: string): Option[Rule] =
   let schemeEnd = s.find("://")

@@ -82,3 +82,13 @@ suite "parseRuleUri":
   test "mode default is hotkey":
     let r = parseRuleUri("linapp://x").get
     check r.mode == mHotkey
+
+  test "+ in query values decodes as space (form-encoded convention)":
+    let r = parseRuleUri("linapp://openconnect?title=F5+VPN&mode=auto").get
+    check r.title == "F5 VPN"
+
+  test "%20 and + decode the same way":
+    let a = parseRuleUri("linapp://x?title=Sign+in").get
+    let b = parseRuleUri("linapp://x?title=Sign%20in").get
+    check a.title == "Sign in"
+    check b.title == "Sign in"
