@@ -143,6 +143,15 @@ proc collectRules*(b: VaultBackend): seq[BoundRule] =
   ## hold URIs; that's a deliberate split — URIs are rule data,
   ## credentials are secret data.)
   ##
+  ## TODO: reconsider storing every password in process memory for the
+  ## daemon's whole lifetime. Currently `credentialOf` populates
+  ## `Credential.password` and we cache the full rule set. Cheaper at
+  ## fill time (no shell-out), but the heap holds every login forever.
+  ## Possible swap: strip password during parse here, then fetch only
+  ## the matched item's password on Fill via `bw get password <id>`
+  ## (or HTTP if we ever adopt `bw serve`). See §13 of PLAN.md for the
+  ## architectural context.
+  ##
   ## Uses `b.session` (the token the backend was constructed with), not
   ## getEnv("BW_SESSION"). The daemon now passes session tokens around
   ## explicitly (cached file, fresh unlock) and never re-exports them

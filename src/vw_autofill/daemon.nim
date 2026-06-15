@@ -13,7 +13,7 @@
 import std/[os, options, json]
 import dbus
 import dbus/lowlevel
-import ./[rule, match, typing, linux_consts]
+import ./[rule, match, typing]
 
 const
   BusName*    = "org.vwautofill.Daemon"

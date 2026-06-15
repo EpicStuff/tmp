@@ -6,7 +6,10 @@
 
 import std/[os, osproc, strtabs, streams, strutils]
 import ./rule
-import ./linux_consts
+
+## Default ydotoold socket path the daemon expects. Matches what the
+## systemd unit lays down with --socket-perm=0666.
+const DefaultYdotoolSocket* = "/tmp/.ydotool_socket"
 
 type
   TypingError* = object of CatchableError

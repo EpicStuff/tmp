@@ -10,7 +10,7 @@
 ## More to come (capture, unlock helper).
 
 import std/[os, json, strutils, uri, osproc, streams, posix, times]
-import vw_autofill/[vault, rule, daemon, linux_consts]
+import vw_autofill/[vault, rule, daemon, typing]
 
 proc isForeground(): bool =
   ## True iff stdin's terminal foreground process group is us. False

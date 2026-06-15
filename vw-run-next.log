@@ -1,9 +1,0 @@
-=== checking ydotool setup ===
-expected device id: 2333:6666
-ydotool binaries: OK
-
-checking keyd journal for ydotool ignore line...
-keyd is ignoring ydotool: OK
-ydotoold running: OK
-
-user answer: y
