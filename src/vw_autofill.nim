@@ -5,11 +5,10 @@
 ##   status   report bw vault status
 ##   daemon   run the session-bus daemon (KWin script + hotkey call into it)
 ##   fill     tell the running daemon to fire its cached match
+##   unlock   prompt for master password + push token to a running daemon
 ##   help     this message
-##
-## More to come (capture, unlock helper).
 
-import std/[os, json, strutils, uri, osproc, streams, posix, times]
+import std/[os, json, strutils, uri, osproc, streams, posix]
 import vw_autofill/[vault, rule, daemon, typing]
 
 proc isForeground(): bool =
@@ -21,34 +20,10 @@ proc isForeground(): bool =
   if fg == -1: return false  ## no controlling terminal at all
   return fg == getpgrp()
 
-proc persistedSessionPath(): string =
-  let dir = getConfigDir() / "vw-autofill"
-  if not dirExists(dir):
-    createDir(dir)
-  dir / "session"
-
-proc readPersistedSession(): string =
-  let p = persistedSessionPath()
-  if not fileExists(p): return ""
-  try:
-    result = readFile(p).strip()
-  except IOError:
-    result = ""
-
-proc writePersistedSession(token: string) =
-  let p = persistedSessionPath()
-  try:
-    writeFile(p, token)
-    when defined(posix):
-      setFilePermissions(p, {fpUserRead, fpUserWrite})
-  except CatchableError as e:
-    stderr.writeLine "WARNING: failed to persist session to " & p &
-      ": " & e.msg
-
 proc spawnUnlockTerminal(): bool =
   ## Pop open a terminal running `./bin/vw_autofill unlock`. Used by
   ## cmdDaemon when it needs the master password but can't prompt
-  ## itself (PLAN.md §13.1). Returns true if a terminal was launched.
+  ## itself. Returns true if a terminal was launched.
   let self = getAppFilename()
   let cmd = @[self, "unlock"]
   var tries: seq[tuple[exe: string, flags: seq[string]]] = @[]
@@ -74,19 +49,6 @@ proc spawnUnlockTerminal(): bool =
     except OSError:
       continue
   return false
-
-proc waitForSessionUpdate(initial: times.Time, timeoutSec = 120): string =
-  ## Poll the persisted session file for an mtime > `initial`. Returns
-  ## the new token, or empty string on timeout.
-  let p = persistedSessionPath()
-  let deadline = getTime() + initDuration(seconds = timeoutSec)
-  while getTime() < deadline:
-    if fileExists(p):
-      let mt = getLastModificationTime(p)
-      if mt > initial:
-        return readPersistedSession()
-    sleep(200)
-  return ""
 
 proc requireDaemon() =
   try:
@@ -117,8 +79,6 @@ proc bwUnlockInteractive(): string =
   ## user types their master password directly. Capture stdout for the
   ## session token. NOTE: bw still phones home for ServerConfig on
   ## unlock, so this requires the Vaultwarden server to be reachable.
-  ## After one successful unlock, the token is persisted (see
-  ## persistedSessionPath) so subsequent daemon restarts work offline.
   stderr.writeLine "Unlocking vault (bw unlock --raw)..."
   let p = startProcess(
     "bw unlock --raw 2>/dev/tty </dev/tty",
@@ -129,28 +89,6 @@ proc bwUnlockInteractive(): string =
   let code = p.waitForExit()
   if code != 0 or token.len == 0:
     raise newException(IOError, "bw unlock failed (exit " & $code & ")")
-  result = token
-
-proc readBwSession(): string =
-  ## Priority:
-  ##   1. BW_SESSION env (trusted as-is; no `bw status` verify, because
-  ##      verify itself calls the Vaultwarden server -- breaks offline)
-  ##   2. Persisted token at ~/.config/vw-autofill/session (mode 0600)
-  ##   3. Spawn `bw unlock --raw`, then persist the token
-  ##
-  ## If a stale/bad token makes it past 1-2, later bw operations will
-  ## fail with "Vault is locked" -- the daemon catches that on the
-  ## D-Bus method handlers; the user can `pkill` and rerun to re-unlock.
-  let env = getEnv("BW_SESSION")
-  if env.len > 0:
-    return env
-  let cached = readPersistedSession()
-  if cached.len > 0:
-    stderr.writeLine "Using cached session from " & persistedSessionPath()
-    return cached
-  let token = bwUnlockInteractive()
-  writePersistedSession(token)
-  stderr.writeLine "Session cached at " & persistedSessionPath()
   result = token
 
 proc runCheck(cmd: string): tuple[output: string, code: int] =
@@ -291,68 +229,48 @@ proc warnIfNoYdotoold(socket: string) =
       " --socket-perm=0666"
 
 proc cmdDaemon() =
-  ## Resolve a working session by *trying* each candidate (env, cached,
-  ## fresh unlock) against the real vault. The previous "trust the
-  ## cached token blindly" path crashed startup with VaultError when
-  ## the cache was stale (after a relock or password change).
-  var session = ""
+  ## Resolve a working session, or fall back to a locked-state startup
+  ## where the daemon serves on the bus but holds no backend until
+  ## someone (typically a spawned `vw-autofill unlock` terminal)
+  ## delivers a session token via the UnlockWith D-Bus method.
+  var backend: BwBackend = nil
   var rules: seq[BoundRule]
 
   proc trySession(s, label: string): bool =
     if s.len == 0: return false
     try:
       let b = newBwBackend(s)
-      rules = b.collectRules()
-      session = s
+      rules = b.collectRules()  # validate + capture in one shot
+      backend = b
       stderr.writeLine "vault: using " & label
       return true
     except CatchableError as e:
       stderr.writeLine "vault: " & label & " is stale (" & e.msg & ")"
       return false
 
-  if not trySession(getEnv("BW_SESSION"), "BW_SESSION env"):
-    if not trySession(readPersistedSession(),
-                      "cached session from " & persistedSessionPath()):
-      if isForeground():
-        let token = bwUnlockInteractive()
-        writePersistedSession(token)
-        if not trySession(token, "fresh unlock"):
-          stderr.writeLine "could not load vault even after fresh unlock"
-          quit 1
-      else:
-        # Per PLAN §13.1: when we can't prompt ourselves (backgrounded,
-        # autostarted, etc.), spawn the user's terminal running
-        # `vw-autofill unlock`. We then wait for the persisted session
-        # file to update.
-        let p = persistedSessionPath()
-        let initialMtime =
-          if fileExists(p): getLastModificationTime(p)
-          else: fromUnix(0)
-        if not spawnUnlockTerminal():
-          stderr.writeLine "No terminal emulator found."
-          stderr.writeLine "Run `./bin/vw_autofill unlock` in a foreground shell."
-          quit 1
-        stderr.writeLine "Waiting for unlock (up to 2 minutes)..."
-        let token = waitForSessionUpdate(initialMtime)
-        if token.len == 0:
-          stderr.writeLine "Timed out waiting for unlock."
-          quit 1
-        if not trySession(token, "spawned-terminal unlock"):
-          stderr.writeLine "Spawned unlock produced a token but vault still won't open."
-          quit 1
+  discard trySession(getEnv("BW_SESSION"), "BW_SESSION env")
+
+  if backend == nil:
+    if isForeground():
+      let token = bwUnlockInteractive()
+      if not trySession(token, "fresh unlock"):
+        stderr.writeLine "could not load vault even after fresh unlock"
+        quit 1
+    else:
+      # Backgrounded / autostarted: can't prompt ourselves. Spawn
+      # a terminal running `vw-autofill unlock`; it'll deliver the
+      # token over D-Bus once the user types their password. We
+      # meanwhile serve on the bus in locked state.
+      if not spawnUnlockTerminal():
+        stderr.writeLine "No terminal emulator found."
+        stderr.writeLine "Run `./bin/vw_autofill unlock` in a foreground shell."
+        quit 1
+      stderr.writeLine "Daemon starting in locked state; waiting for unlock terminal."
 
   let socket = getEnv("YDOTOOL_SOCKET", DefaultYdotoolSocket)
   let logPath = getEnv("VW_AUTOFILL_LOG", "/tmp/vw-autofill-daemon.log")
   warnIfNoYdotoold(socket)
-  let b = newBwBackend(session)
-  let d = newDaemon(rules, socket, logPath)
-  let backend = b
-  let sessionCopy = session
-  d.reloadProc     = proc(): seq[BoundRule] = backend.collectRules()
-  d.listLoginsProc = proc(): seq[Credential] = backend.listLogins()
-  d.addUriProc     = proc(itemId, uri: string) =
-    bwAddUriToItem(itemId, uri, sessionCopy)
-  d.statusProc     = proc(): JsonNode = backend.status()
+  let d = newDaemon(backend, rules, socket, logPath)
   d.serve()
 
 proc cmdReload() =
@@ -365,15 +283,19 @@ proc cmdFill() =
   sendFill()
 
 proc cmdUnlock() =
-  ## Explicit interactive unlock. Useful when you want to background
-  ## the daemon afterward (a backgrounded daemon can't prompt for the
-  ## master password itself -- see isForeground in cmdDaemon).
+  ## Prompt for the master password, run `bw unlock --raw`, and push
+  ## the resulting session token to a running daemon over D-Bus.
   if not isForeground():
     stderr.writeLine "unlock needs a foreground shell (it prompts for the master password)"
     quit 1
   let token = bwUnlockInteractive()
-  writePersistedSession(token)
-  echo "session persisted to ", persistedSessionPath()
+  try:
+    let n = sendUnlockWith(token)
+    echo "daemon unlocked: ", n, " rule(s)"
+  except Exception as e:
+    stderr.writeLine "could not deliver token to daemon: " & e.msg
+    stderr.writeLine "Start the daemon first: ./bin/vw_autofill daemon"
+    quit 1
 
 proc cmdIntrospect() =
   ## Talk to the running daemon via the same nim-dbus library it serves
@@ -405,31 +327,23 @@ proc promptDefault(prompt, default: string): string =
   if line.len == 0: default else: line
 
 proc fzfPick(prompt: string, choices: openArray[string]): string =
-  ## Show `choices` in fzf if available; fall back to a numeric
-  ## menu if not. Empty result means the user cancelled (esc / no
-  ## selection).
-  if findExe("fzf").len > 0:
-    let p = startProcess(
-      "fzf",
-      args = @["--prompt=" & prompt & "> ", "--height=30%", "--reverse",
-               "--no-multi"],
-      options = {poUsePath, poStdErrToStdOut},
-    )
-    p.inputStream.write(choices.join("\n"))
-    p.inputStream.close()
-    result = p.outputStream.readAll().strip()
-    discard p.waitForExit()
-    p.close()
-    return
-  echo prompt, ":"
-  for i, c in choices: echo "  ", i+1, ") ", c
-  stdout.write("pick [1]: "); stdout.flushFile()
-  let raw = readLine(stdin).strip()
-  let idx =
-    if raw.len == 0: 0
-    else:
-      try: parseInt(raw) - 1 except ValueError: -1
-  result = if idx >= 0 and idx < choices.len: choices[idx] else: ""
+  ## Show `choices` in fzf. Empty result means the user cancelled
+  ## (esc / no selection). fzf is required — install it via your
+  ## package manager if missing.
+  if findExe("fzf").len == 0:
+    stderr.writeLine "fzf is required for the capture flow; install fzf and retry"
+    quit 1
+  let p = startProcess(
+    "fzf",
+    args = @["--prompt=" & prompt & "> ", "--height=30%", "--reverse",
+             "--no-multi"],
+    options = {poUsePath, poStdErrToStdOut},
+  )
+  p.inputStream.write(choices.join("\n"))
+  p.inputStream.close()
+  result = p.outputStream.readAll().strip()
+  discard p.waitForExit()
+  p.close()
 
 proc cmdCapture() =
   ## Interactive rule-creation flow. Vault access goes through the
@@ -528,7 +442,7 @@ Commands:
     list                  list every rule URI in your unlocked vault
     status                print bw vault status JSON
     daemon                run the session-bus daemon (auto-unlocks if foreground)
-    unlock                explicit interactive unlock + persist session
+    unlock                prompt + push session token to running daemon
     fill                  tell a running daemon to fire its cached match
     reload                tell a running daemon to re-fetch rules from bw
     capture               interactive rule builder for the focused window
@@ -540,7 +454,7 @@ Commands:
     help                  this message
 
 Environment:
-    BW_SESSION       required for list/status/daemon
+    BW_SESSION       optional; daemon will validate it on startup
     YDOTOOL_SOCKET   override ydotool socket path (default $1)
     VW_AUTOFILL_LOG  if set, daemon also appends events to this path
 """ % DefaultYdotoolSocket

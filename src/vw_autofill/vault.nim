@@ -1,8 +1,6 @@
-## Vault backend abstraction.
-##
-## Concrete impls so far: BwBackend (official `bw` CLI). The interface
-## is a closure-based VTable so we can swap in `rbw` on Linux later
-## without touching call sites.
+## Vault backend. Wraps the `bw` CLI with an explicit session token —
+## never reads BW_SESSION from env, so the daemon can hand around
+## tokens without polluting its own environment.
 
 import std/[json, options, osproc, os, strtabs, streams, strutils]
 import ./rule
@@ -11,16 +9,13 @@ import ./uri
 type
   VaultError* = object of CatchableError
 
-  VaultBackend* = ref object
+  BwBackend* = ref object
     session*: string
-    listLoginsImpl*: proc(): seq[Credential] {.closure.}
-    statusImpl*: proc(): JsonNode {.closure.}
 
-proc listLogins*(b: VaultBackend): seq[Credential] =
-  b.listLoginsImpl()
-
-proc status*(b: VaultBackend): JsonNode =
-  b.statusImpl()
+proc newBwBackend*(session: string): BwBackend =
+  if session.len == 0:
+    raise newException(VaultError, "BW_SESSION is empty")
+  BwBackend(session: session)
 
 proc bwEnv(session: string): StringTableRef =
   result = newStringTable()
@@ -91,31 +86,24 @@ proc credentialOf(item: JsonNode): Credential =
     totpSecret: item{"login", "totp"}.getStr,
   )
 
-proc newBwBackend*(session: string): VaultBackend =
-  if session.len == 0:
-    raise newException(VaultError, "BW_SESSION is empty")
+proc status*(b: BwBackend): JsonNode =
+  let (output, errOutput, code) = runBw(["status"], b.session)
+  parseBwJson(output, errOutput, code, "bw status")
 
-  result = VaultBackend(session: session)
-  let sessionCopy = session
+proc listLogins*(b: BwBackend): seq[Credential] =
+  let (output, errOutput, code) = runBw(["list", "items"], b.session)
+  let root = parseBwJson(output, errOutput, code, "bw list items")
+  for item in root:
+    if item{"type"}.getInt != 1:  ## type 1 = login
+      continue
+    result.add credentialOf(item)
 
-  result.listLoginsImpl = proc(): seq[Credential] =
-    let (output, errOutput, code) = runBw(["list", "items"], sessionCopy)
-    let root = parseBwJson(output, errOutput, code, "bw list items")
-    for item in root:
-      if item{"type"}.getInt != 1:  ## type 1 = login
-        continue
-      result.add credentialOf(item)
-
-  result.statusImpl = proc(): JsonNode =
-    let (output, errOutput, code) = runBw(["status"], sessionCopy)
-    parseBwJson(output, errOutput, code, "bw status")
-
-proc bwAddUriToItem*(itemId, newUri, session: string) =
+proc addUriToItem*(b: BwBackend, itemId, newUri: string) =
   ## Fetch item, append `newUri` to its login.uris, push back via
   ## bw encode | bw edit item <id>. After this returns, bw's local
   ## cache holds the new URI and the daemon's next collectRules()
   ## will see it.
-  let (gout, gerr, gcode) = runBw(@["get", "item", itemId], session)
+  let (gout, gerr, gcode) = runBw(@["get", "item", itemId], b.session)
   let item = parseBwJson(gout, gerr, gcode, "bw get item " & itemId)
   if item{"type"}.getInt != 1:
     raise newException(VaultError, "item " & itemId & " is not a login")
@@ -128,36 +116,26 @@ proc bwAddUriToItem*(itemId, newUri, session: string) =
   entry["uri"] = newJString(newUri)
   item["login"]["uris"].add(entry)
 
-  let (eout, eerr, ecode) = runBwStdin(@["encode"], session, $item)
+  let (eout, eerr, ecode) = runBwStdin(@["encode"], b.session, $item)
   if ecode != 0:
     raise newException(VaultError, "bw encode failed: " & eerr & " stdout=" & eout)
   let encoded = eout.strip()
 
-  let (uout, uerr, ucode) = runBwStdin(@["edit", "item", itemId], session, encoded)
+  let (uout, uerr, ucode) = runBwStdin(@["edit", "item", itemId], b.session, encoded)
   if ucode != 0:
     raise newException(VaultError, "bw edit item failed: " & uerr & " stdout=" & uout)
 
-proc collectRules*(b: VaultBackend): seq[BoundRule] =
-  ## Convenience: pull items via bw and re-fetch URIs from the raw JSON.
-  ## (We re-shell because the credential carrier above doesn't yet
-  ## hold URIs; that's a deliberate split — URIs are rule data,
-  ## credentials are secret data.)
+proc collectRules*(b: BwBackend): seq[BoundRule] =
+  ## Pull items via bw, parse each login.uris entry, and return the
+  ## ones that resolve to a vw-autofill Rule.
   ##
-  ## TODO: reconsider storing every password in process memory for the
-  ## daemon's whole lifetime. Currently `credentialOf` populates
+  ## TODO: reconsider storing every password in process memory for
+  ## the daemon's whole lifetime. Currently `credentialOf` populates
   ## `Credential.password` and we cache the full rule set. Cheaper at
   ## fill time (no shell-out), but the heap holds every login forever.
   ## Possible swap: strip password during parse here, then fetch only
-  ## the matched item's password on Fill via `bw get password <id>`
-  ## (or HTTP if we ever adopt `bw serve`). See §13 of PLAN.md for the
-  ## architectural context.
-  ##
-  ## Uses `b.session` (the token the backend was constructed with), not
-  ## getEnv("BW_SESSION"). The daemon now passes session tokens around
-  ## explicitly (cached file, fresh unlock) and never re-exports them
-  ## into its own env, so re-reading env here was always empty —
-  ## producing a "Vault is locked" from bw with no session.
-  let s = b.statusImpl()
+  ## the matched item's password on Fill via `bw get password <id>`.
+  let s = b.status()
   if s{"status"}.getStr != "unlocked":
     raise newException(VaultError, "vault is " & s{"status"}.getStr)
 

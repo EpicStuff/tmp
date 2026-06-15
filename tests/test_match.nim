@@ -2,6 +2,8 @@ import std/[unittest, options]
 import ../src/vw_autofill/[uri, rule, match]
 
 proc mk(s: string): Rule = parseRuleUri(s).get
+proc br(uri: string, name: string): BoundRule =
+  BoundRule(rule: mk(uri), credential: Credential(itemName: name))
 
 const linux = true
 const win = false
@@ -86,3 +88,40 @@ suite "rule matching":
     check rule.matches(w, linux)
     let w2 = WindowInfo(exePath: "/opt/firefox/firefox", exeName: "firefox")
     check not rule.matches(w2, linux)
+
+suite "bestMatch":
+
+  test "empty rules returns none":
+    let m = bestMatch(newSeq[BoundRule](), WindowInfo(exeName: "firefox"), linux)
+    check m.isNone
+
+  test "no rules match returns none":
+    let rules = @[br("linapp://chromium?title=Login", "wrong-app")]
+    let w = WindowInfo(exeName: "firefox", title: "Login")
+    check bestMatch(rules, w, linux).isNone
+
+  test "first matching rule wins on ties":
+    let rules = @[
+      br("linapp://firefox?title=Login", "first"),
+      br("linapp://firefox?title=Login", "second"),
+    ]
+    let w = WindowInfo(exeName: "firefox", title: "Login")
+    let m = bestMatch(rules, w, linux)
+    check m.isSome
+    check m.get.credential.itemName == "first"
+
+  test "skips non-matching rules to find a later match":
+    let rules = @[
+      br("linapp://chromium?title=Login", "chromium-rule"),
+      br("linapp://firefox?title=Login",  "firefox-rule"),
+    ]
+    let w = WindowInfo(exeName: "firefox", title: "Login")
+    let m = bestMatch(rules, w, linux)
+    check m.isSome
+    check m.get.credential.itemName == "firefox-rule"
+
+  test "platform filter propagates through":
+    let rules = @[br("linapp://firefox?unsafe=1", "linux-only")]
+    let w = WindowInfo(exeName: "firefox")
+    check bestMatch(rules, w, linux).isSome
+    check bestMatch(rules, w, win).isNone

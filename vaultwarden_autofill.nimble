@@ -1,4 +1,4 @@
-version       = "0.0.1"
+version       = "0.0.2"
 author        = "vw-autofill"
 description   = "Cross-platform desktop autofill for Bitwarden/Vaultwarden"
 license       = "MIT"
@@ -10,6 +10,9 @@ bin           = @["vw_autofill"]
 requires "nim >= 2.0.0"
 requires "dbus"
 
-task test, "Run tests":
+task test, "Run unit tests":
   exec "nim r -d:release tests/test_uri.nim"
   exec "nim r -d:release tests/test_match.nim"
+
+task integration, "Run integration tests (requires live test Vaultwarden + bw)":
+  exec "python3 tests/integration.py"

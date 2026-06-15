@@ -5,7 +5,7 @@
 ## (auto-fire vs hotkey-only) and which one to pick when several
 ## match.
 
-import std/[strutils, re]
+import std/[options, strutils, re]
 import ./rule
 
 type
@@ -55,3 +55,14 @@ proc matches*(rule: Rule, w: WindowInfo, platformIsLinux: bool): bool =
   if not rule.textMatches(w):
     return false
   true
+
+proc bestMatch*(rules: openArray[BoundRule], w: WindowInfo,
+                platformIsLinux: bool): Option[BoundRule] =
+  ## First rule whose `Rule` matches the window wins. Rule order in
+  ## the input is the priority order; vault rule order is preserved
+  ## from the `bw list items` output, so users can promote a rule by
+  ## reordering its URI within the vault item's login.uris list.
+  for br in rules:
+    if br.rule.matches(w, platformIsLinux):
+      return some(br)
+  none(BoundRule)
